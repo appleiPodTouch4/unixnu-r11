@@ -1,0 +1,247 @@
+schema_version = 1
+
+[device]
+name = "r11"
+soc = "SDM660"
+os_profile = "ipados-17.7.11-21H461"
+summary = "OPPO R11 (CPH1707 / 16051) on SDM660 + PM660/PM660L. Board inputs, firmware and boot image are derived from the device's own OFP package; the storage, display, input and power drivers are not written yet."
+
+[[area]]
+id = "configuration"
+status = "implemented"
+components = []
+paths = ["board.toml", "feeds.toml", "configs/**", "patches/**", ".github/**", ".gitignore"]
+inputs = ["SDM660 shared support (../UniXNU-sdm660-common), iPadOS 17.7.11 build 21H461 profile, r11 defconfig.", "OFP package model 16051: boot.img, gpt_main0.bin, xbl.elf."]
+configuration = ["schema_version = 2; board.soc_source = sdm660; board.os_profile = ipados-17.7.11-21H461.", "kernel.defconfig = r11_defconfig; fragments arch + soc + os; device patch series present but empty.", "kernel.archives lists the arch-profile scripts because arrays replace inherited arrays."]
+procedure = ["python3 scripts/extract-inputs.py --ofp ../ofp_extracted", "./unixnu defconfig r11_defconfig -D ../UniXNU-r11", "./unixnu status --json -D ../UniXNU-r11"]
+findings = ["The OFP boot image carries three appended device trees for board-id subtypes 0x3eb3, 0x3ee7 and 0x3ef6; 0x3eb3 is the 16051 tree and is the one committed as inputs/r11-stock.dtb.", "The stock device tree leaves /memory at zero because ABL patches it from SMEM, so the 4 GiB window is taken from hardware measurement and must be confirmed on the target device.", "The SoC layer has no published repository yet; feeds.toml points at a sibling checkout, so the build is not reproducible from a clean clone until it is pushed and pinned."]
+completion = ["defconfig and status resolve arch, SoC, OS and device layers; every referenced file exists."]
+limits = ["SoC source is local, not pinned. No unixnu.lock yet: nothing git-hosted is selected besides the UniXNU defaults."]
+next_action = ["Push UniXNU-sdm660-common, switch feeds.toml to git plus a commit, run unixnu fetch and commit unixnu.lock."]
+
+[[area.evidence]]
+kind = "source"
+reference = "board.toml"
+result = "Format 2 board configuration with values traced to inputs/hw.json"
+
+[[area]]
+id = "firmware"
+status = "implemented"
+components = ["DarwinBoot"]
+paths = ["scripts/check-r11.py", "proprietary-files.txt", "inputs/r11-stock.dtb"]
+inputs = ["uefi-r11 platform package in Mu-Silicium layout, adapted from the SDM660 reference platform.", "Stock XBL memory reservation strings, stock boot image geometry, stock device tree."]
+configuration = ["firmware.dsc = Platforms/OPPO/r11Pkg/r11.dsc; firmware.config = r11; fd = Build/r11Pkg/{target}_CLANGPDB/FV/R11_UEFI.fd.", "FD base 0x9FC00000 and size 0x300000 in Resources/Configs/r11.toml, r11.dsc and the BootShim compile flags.", "The FDF embeds UniXNU, UniXNUDxe, UniXNURamDiskDxe, DarwinBoot, DiskIoDxe, PartitionDxe and Fat."]
+procedure = ["uefi-r11/scripts/prepare-base.sh (Mu-Silicium + Mu_Basecore + vendor binaries).", "./unixnu build firmware -D ../UniXNU-r11 --uefi ../uefi-r11-base --edk2 ../Mu_Basecore", "python3 scripts/check-r11.py (also runs as the firmware preflight)."]
+findings = ["The stock xbl.elf is UEFI 4.1 (SDM660 LA) and reserves exactly the windows the platform uses: DXE Heap 0x94000000+0x09400000, UEFI FD 0x9FC00000+0x00300000, UEFI Stack 0x9FF90000+0x00040000.", "SimpleFbDxe locates the framebuffer by the memory-map region name Display Reserved; the stock splash reservation 0x9D400000+0x02400000 matches that region, so the menu can be drawn over the vendor boot logo without an MDSS driver.", "The panel driver is the one vendor piece that cannot be reused: the reference SDM660 DisplayDxe targets a different panel, so USE_CUSTOM_DISPLAY_DRIVER stays 0.", "No ACPI tables are built: UniXNU hands XNU an ADT and nothing else consumes ACPI on this target."]
+completion = ["The FD builds at exactly 0x300000 bytes, BootShim carries the same base and size, and the boot image round-trips through unixnu bootimg."]
+limits = ["Vendor DXE binaries are seeded from a sibling SDM660 UEFI device; charger and battery profiles and the button GPIO map are not R11 values yet.", "No R11 panel driver, so DisplayDxe is disabled."]
+next_action = ["Build the FD on a macOS or Linux host and record the output size, then boot it with fastboot boot and capture the framebuffer checkpoint."]
+
+[[area.evidence]]
+kind = "source"
+reference = "scripts/check-r11.py"
+result = "Preflight checks the Display Reserved region the SDM660 memory map must keep; the map itself lives in the sibling uefi-r11 repository"
+
+[[area]]
+id = "cpu"
+status = "implemented"
+components = ["ArmCpu", "ArmDTPlatform", "SoftwareAES"]
+paths = ["dts/r11.dts", "configs/r11_defconfig"]
+inputs = ["8 cores in two clusters: MPIDR 0x0-0x3 (A53 class, part 0x801) and 0x100-0x103 (A73 class, part 0x800).", "GICv3 distributor 0x17a00000 and redistributors 0x17b00000 (8 x 0x20000), 19.2 MHz arch timer, PSCI over SMC."]
+configuration = ["dts/r11.dts includes sdm660.dtsi and tags cpu0-3 as E and cpu4-7 as P with unixnu,cluster-type.", "Kernel arguments r11-smp=1 and armcpu-spi-ipi=1."]
+procedure = ["Compile dts/r11.dts, inspect the ADT cpu nodes and the /arm-io ranges.", "Record per-CPU entry and timer/IPI delivery on the device."]
+findings = ["SDM660 exposes both clusters with 4 cores each; per-CPU reg values are affinities, not indices, so ADT output must keep 0x100-0x103 for the gold cluster.", "The arch timer interrupts are PPI 13/14/11/10, matching the SDM660 platform include used by the firmware."]
+completion = ["All eight CPUs reach their entry checkpoint and the timer ticks on every core."]
+limits = ["No CPU frequency or idle driver: r11-cpufreq is passed but no board driver implements it."]
+next_action = ["Record the first ARMCPU checkpoint from a device boot with serial=3 and the framebuffer console."]
+
+[[area.evidence]]
+kind = "source"
+reference = "dts/r11.dts"
+result = "Two-cluster MPIDR layout (0x0-0x3, 0x100-0x103) with E/P cluster types, taken from the stock device tree"
+
+[[area]]
+id = "memory"
+status = "implemented"
+components = ["XnuPrelink"]
+paths = ["dts/r11.dts", "inputs/hw.json", "scripts/extract-inputs.py"]
+inputs = ["Handoff window 0x80000000 + 0xFE4C0000 (bank0 2 GiB plus bank1 0x7E4C0000, adjacent).", "Reservations: splash 0x9D400000+0x02400000, removed_regions 0x85800000+0x03700000, modem 0x8AC00000+0x07E00000, ADSP 0x92A00000+0x02000000, CDSP 0x94C00000+0x00600000."]
+configuration = ["payload.dram_size = 0xFE4C0000 must equal the /memory reg, the ADT generator rejects a mismatch.", "payload.adt.owned_memory_size = 0xC0000000 (3 GiB)."]
+procedure = ["Compare the firmware memory map, the DTS reservations and the ADT /chosen/dram-base and dram-size.", "Check that the FD window 0x9FC00000+0x300000 stays outside every reservation."]
+findings = ["The ADT generator accepts exactly one contiguous DRAM range, so the two adjacent banks are described as one range.", "The FD window sits above the splash reservation and below the stack window, matching the stock XBL layout.", "The stock tree zeroes /memory: any value here is an assumption about the retail unit and must be confirmed."]
+completion = ["XNU reports the expected physical memory and no driver allocates inside a reserved region."]
+limits = ["3 GiB owned memory is a first-bring-up value; the remaining ~1 GiB stays with the firmware and reservations."]
+next_action = ["Read the real SMEM DRAM size on the device and update dts/r11.dts, payload.dram_size and owned_memory_size together."]
+
+[[area.evidence]]
+kind = "source"
+reference = "inputs/hw.json"
+result = "DRAM window and every reserved region decoded from the stock device tree and GPT images"
+
+[[area]]
+id = "storage"
+status = "planned"
+components = []
+paths = ["drivers/**", "configs/r11_defconfig"]
+inputs = ["eMMC 5.1 on sdhci@c0c4000 (0x0C0C4000, core 0x0C0C5000), 512-byte LBA, non-A/B.", "GPT (inputs/partitions.json): boot 245760-376831 (64 MiB), userdata grow from 10944512, 69 partitions."]
+configuration = ["[userdata] first_lba 0x14E000, last_lba 0xE8F7FA, lba_bytes 4096.", "CONFIG_XNU_NATIVE_UFS=n and CONFIG_XNU_NATIVE_RAM_BLOCK=n for the first bring-up; the root is mockfs."]
+procedure = ["Write a board eMMC driver (SDHCI v5 with SDM660 clocks and GDSC), then enable CONFIG_XNU_NATIVE_RAM_BLOCK.", "Build the userdata image with unixnu build userdata and record the volume UUID back into board.toml."]
+findings = ["userdata is a grow partition in the shipped GPT (size 0), so its end LBA depends on the eMMC capacity; the value here is the 64 GiB mapping.", "root_match_volume_uuid is zero until the userdata image exists."]
+completion = ["The kernel mounts an APFS root from eMMC and the payload can address block slices."]
+limits = ["No XNU eMMC driver. UEFI storage exists through the vendor SdccDxe, which is enough to read the payload but not to run the kernel stack."]
+next_action = ["Port the SDHCI driver from the SDM660 kernel sources and verify a read of partition 21 (boot) first."]
+
+[[area.evidence]]
+kind = "source"
+reference = "inputs/partitions.json"
+result = "GPT geometry: boot 245760-376831, userdata grow from LBA 10944512, 69 partitions"
+
+[[area]]
+id = "display"
+status = "planned"
+components = ["GopFramebuffer"]
+paths = ["inputs/r11-stock.dts", "dts/r11.dts", "board.toml"]
+inputs = ["Samsung S6E3FA3 AMOLED 1080x1920, command mode, single DSI, 60 Hz (qcom,mdss_dsi_oppo16051samsung_s6e3fa3_1080p_cmd).", "MDSS 0xc900000+0x90000, DSI PLL/PHY 0xc994400, MMSS SMMU 0xcd00000.", "Continuous splash buffer 0x9D400000+0x02400000."]
+configuration = ["Firmware: USE_CUSTOM_DISPLAY_DRIVER = 0, SimpleFbDxe over PcdFrameBuffer 1080x1920x32.", "Kernel: offline-legacy-gop=1 renders the console into GOP; CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n."]
+procedure = ["Boot the FD and confirm the menu over the OPPO boot logo.", "Then write a DSI panel driver replaying the init sequence from inputs/r11-stock.dts."]
+findings = ["The panel node in the stock tree holds 79 properties including the full init, timing and PHY tables, so the sequence does not have to be reverse engineered from the kernel binary.", "SimpleFbDxe finds its buffer by the Display Reserved region name, which is why MemoryMapLib keeps that exact string."]
+completion = ["Menu, then XNU console, then a framebuffer handoff at native resolution over the real MDSS driver."]
+limits = ["No MDSS/DSI driver. Display works only as long as the vendor bootloader leaves the panel on and the framebuffer untouched.", "No backlight control: r11-backlight is passed but unimplemented."]
+next_action = ["Extract the panel init sequence into driver tables and bring up DSI in command mode with a test pattern."]
+
+[[area.evidence]]
+kind = "source"
+reference = "inputs/r11-stock.dts"
+result = "Panel node with its full init, timing and PHY tables and the splash reservation"
+
+[[area]]
+id = "input"
+status = "planned"
+components = []
+paths = ["dts/r11.dts", "drivers/**"]
+inputs = ["Synaptics S3508 touch at i2c@c175000 (0x0C175000), address 0x20, node synaptics16051@20, compatible synaptics-s3508.", "Interrupt on TLMM GPIO 67 (from the stock device tree)."]
+configuration = ["i2c1 is enabled in dts/r11.dts with a touchscreen@20 child tagged unixnu,adt-name = touchscreen."]
+procedure = ["Read the RMI4 product info over the vendor I2CDxe first, then implement the XNU HID driver."]
+findings = ["The touch controller is an RMI4 device, so the driver needs function 0x11 (2D) plus firmware query, not a register map.", "No UART is exposed on this board, so early diagnostics rely on the framebuffer."]
+completion = ["Touch events reach the XNU HID stack with correct coordinates in both orientations."]
+limits = ["No driver. r11-touch and r11-touch-hid are passed but unimplemented."]
+next_action = ["Dump RMI4 function descriptors through UEFI I2CDxe to confirm the sensor generation."]
+
+[[area.evidence]]
+kind = "source"
+reference = "inputs/hw.json"
+result = "Synaptics S3508 at i2c@c175000 address 0x20 and its interrupt line from the stock tree"
+
+[[area]]
+id = "power"
+status = "planned"
+components = []
+paths = ["proprietary-files.txt", "drivers/**", "board.toml"]
+inputs = ["PM660 + PM660L over SPMI (0x0800F000), charger MCU pic16f/stm8s at 0x25/0x26 on i2c@c176000, fuel gauge bq27541 at 0x55.", "Stock XBL PSHOLD at 0x010AC000, PSHOLD offset 0xC000."]
+configuration = ["Firmware: vendor PmicDxeLa, AdcDxe, TsensDxe, ChargerExDxe and QcomChargerDxeLA are included.", "Kernel: r11-pmgr=2 and r11-disable-watchdogd=1 are passed but have no board implementation."]
+procedure = ["Verify charger detection and battery readings from the firmware menu before adding kernel power management."]
+findings = ["Charging is not PMIC-only: OPPO VOOC runs through an external MCU, so the vendor charger profile must be replaced with R11 values.", "The watchdog must be disabled or serviced before XNU reaches launchd; the board passes r11-disable-watchdogd=1."]
+completion = ["Battery level, charger state and thermal readings are correct; the device survives a full boot without a watchdog reset."]
+limits = ["Vendor charger and battery profiles are inherited from the reference SDM660 device."]
+next_action = ["Read the charger and battery configuration from the R11 splash partition and replace RawFiles/QcomChargerCfg.cfg and BATTERY.PROVISION."]
+
+[[area.evidence]]
+kind = "source"
+reference = "board.toml"
+result = "Kernel arguments and the vendor DXE list currently selected for power and charging"
+
+[[area]]
+id = "packaging"
+status = "implemented"
+components = ["XnuPrelink", "DarwinBoot"]
+paths = ["board.toml", "inputs/hw.json", "inputs/partitions.json"]
+inputs = ["Stock boot image header: version 0, page 4096, kernel 0x8000, ramdisk 0x1000000, tags 0x100, second 0xf00000.", "IPSW: iPad Pro 17.7.11 (21H461), product iPad7,1, chip_id 0x8011."]
+configuration = ["[bootimg.image] mirrors the stock header; [payload] volume R11ESP, size 192 MiB, loader firmware.", "No [[bootimg.dtb_node]]: the stock tree already has /reserved-memory/splash_region."]
+procedure = ["./unixnu build payload --unique-chip-id <hex> --trust-cache <bundle>", "./unixnu bootimg -D ../UniXNU-r11 --uefi ../uefi-r11-base --dtb ../uefi-r11-base/Platforms/OPPO/r11Pkg/DeviceTree/r11.dtb"]
+findings = ["OPPO uses tags 0x100 rather than the usual 0x1e00000; bootimg verifies the load addresses and rejects a wrong offset.", "The boot partition is 64 MiB while the payload is 192 MiB, so the image must go through fastboot boot, not fastboot flash boot.", "The stock boot image is gzip(Image) plus a multi-DTB block of three trees; the firmware DTB for bootimg is the single 16051 tree."]
+completion = ["boot.json reports the expected kernel address, tags address and a nonzero ramdisk size, and the image boots to the UniXNU menu."]
+limits = ["Payload size assumes fastboot boot with max-download 512 MiB (reported by getvar on the reference unit)."]
+next_action = ["Capture boot.json from the first device attempt and record it as evidence."]
+
+[[area.evidence]]
+kind = "source"
+reference = "inputs/hw.json"
+result = "Stock boot image header fields that board.toml [bootimg.image] mirrors"
+
+[[area.evidence]]
+kind = "source"
+reference = "docs/host-toolchain.md"
+result = "The 60 arch/SoC patches and the archive builders pass on macOS 12; the XNU compile itself needs Xcode 15 or newer because mig emits -mach_msg2, which Apple clang 14 and LLVM 15 both reject. Use .github/workflows/macos.yml until a newer host is available."
+
+[[area]]
+id = "diagnostics"
+status = "planned"
+components = []
+paths = ["scripts/**", "docs/**"]
+inputs = ["No UART pads on the R11; the framebuffer is the only early output.", "Stock bootargs keep printk.disable_uart=1."]
+configuration = ["boot-progress=2 and offline-legacy-gop=1 run the console through the framebuffer.", "serial=3 is still passed for the case where a UART is soldered on."]
+procedure = ["Save the framebuffer checkpoint after each stage; use unixnu/scripts for log extraction."]
+findings = ["With no serial console, every firmware checkpoint must be visible on screen; the UniXNU menu over the vendor logo is the first such checkpoint."]
+completion = ["Each bring-up stage is observable and recorded with the image revision."]
+limits = ["Advanced Logger and QR log export are not integrated into the r11 firmware yet."]
+next_action = ["Add AdvancedLogDxe and the Tools menu entry to the FD so firmware logs can be exported without a UART."]
+
+[[area.evidence]]
+kind = "source"
+reference = "board.toml"
+result = "Boot arguments that route the console through the framebuffer"
+
+[[area]]
+id = "gpu"
+status = "planned"
+components = []
+paths = ["drivers/**"]
+inputs = ["Adreno 512 at 0x05000000, GPU SMMU 0x05040000, GPUCC 0x05065000, GMU 0x00780000."]
+configuration = ["dts/r11.dts keeps the GPU nodes disabled; no GPU kernel argument is passed."]
+procedure = ["Only after display and storage are device-verified."]
+findings = ["Adreno 512 is a different generation from the Adreno 740 path the project uses today, so the existing GPU kits do not apply directly."]
+completion = ["Metal or IOKit GPU services come up on the device."]
+limits = ["Out of scope for the first bring-up."]
+next_action = ["Evaluate the Adreno 5xx firmware and PM4 packet format against kits/AdrenoPM4."]
+
+[[area.evidence]]
+kind = "source"
+reference = "inputs/hw.json"
+result = "Adreno 512, GPU SMMU and GPUCC addresses decoded from the stock tree"
+
+[[area]]
+id = "network"
+status = "planned"
+components = []
+paths = ["drivers/**", "dts/r11.dts"]
+inputs = ["WCN3990 class combo at 0x18800000, integrated in the SoC."]
+configuration = ["wlan node disabled in the SoC dtsi."]
+procedure = ["After storage and input."]
+findings = ["The R11 uses the integrated WLAN block, so no SDIO card detection is needed."]
+completion = ["Association and packet transfer through the XNU network stack."]
+limits = ["No driver, no firmware extraction."]
+next_action = ["Identify the WCN3990 firmware partition and the calibration data location."]
+
+[[area.evidence]]
+kind = "source"
+reference = "inputs/hw.json"
+result = "Integrated WLAN block address from the stock tree"
+
+[[area]]
+id = "audio"
+status = "planned"
+components = []
+paths = ["drivers/**", "dts/r11.dts"]
+inputs = ["AK4376 DAC at 0x10 on i2c@c1b6000, TFA98xx amplifier at 0x36, ADSP 0x15700000."]
+configuration = ["No audio nodes enabled."]
+procedure = ["After the core bring-up stages."]
+findings = ["Playback needs the ADSP firmware, which is a reserved region in the stock tree (0x92A00000)."]
+completion = ["Playback and capture through the XNU audio stack."]
+limits = ["Out of scope for the first bring-up."]
+next_action = ["Extract the ADSP firmware from the OFP package and confirm the region ownership."]
+
+[[area.evidence]]
+kind = "source"
+reference = "inputs/hw.json"
+result = "AK4376, TFA98xx and ADSP addresses decoded from the stock tree"
+

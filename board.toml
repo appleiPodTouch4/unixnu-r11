@@ -1,0 +1,146 @@
+# Board description of the OPPO R11 (r11 / CPH1707, model 16051), Qualcomm SDM660.
+# Read by the unixnu build driver. Every value below has a source in
+# inputs/hw.json unless a comment marks it as pending device confirmation.
+schema_version = 2
+
+[board]
+name = "r11"
+soc = "SDM660"
+soc_source = "sdm660"
+os_profile = "ipados-17.7.11-21H461"
+description = "OPPO R11 (CPH1707): SDM660, PM660/PM660L, 1080x1920 AMOLED, 64 GiB eMMC"
+kit = "r11"
+
+# Components resolved from components.toml. The SDM660 specific pieces (storage,
+# display, input, power) have no shared implementation yet; they are listed in
+# porting.toml with status = planned and land in package/ as they are written.
+[components]
+include = ["ArmDTPlatform", "ArmCpu", "SoftwareAES", "GopFramebuffer", "XnuPrelink", "DarwinBoot"]
+
+[userdata]
+# GPT (inputs/partitions.json): userdata starts at 512-byte LBA 10944512 and is
+# a grow partition (size 0, filled at first boot). The end below is the 64 GiB
+# unit mapping measured on hardware and leaves the backup GPT area untouched.
+# Confirm with: fastboot getvar partition-size:userdata
+first_lba = 0x14E000          # 1368064 * 4096 = 10944512 * 512
+last_lba = 0xE8F7FA           # 15267834, i.e. 512-byte LBA 122142686
+lba_bytes = 4096
+windows = [
+  { name = "OS", component = "OS" },
+  { name = "SystemOS", component = "Cryptex1,SystemOS" },
+]
+
+[kernel]
+defconfig = "r11_defconfig"
+config_fragments = ["arch:configs/common.config", "soc:configs/sdm660.config", "os:configs/ipados.config"]
+# The OS profile series is not inherited: its zzz-boot-progress.patch carries
+# hunks against code that only the SM8550 sheng patches add. The board series
+# lists the same component patches plus a board copy of that patch.
+patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "device:patches/xnu/series"]
+# The arch profile list, kept in full because arrays replace inherited arrays.
+# Board archives (native display, touch, power, storage) are not written yet:
+# see porting.toml area "display", "input", "power" and "storage".
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "component:ArmDTPlatform",
+  "component:ArmCpu",
+  "component:SoftwareAES",
+  "build-software-aes-bindings.py",
+  "build-mockfs-fixture.py",
+  "build-libpthread-kernel.py",
+]
+
+[device_tree]
+source = "device:dts/r11.dts"
+include_dirs = ["soc:dts"]
+
+[firmware]
+config = "r11"
+dsc = "Platforms/OPPO/r11Pkg/r11.dsc"
+fd = "Build/r11Pkg/{target}_CLANGPDB/FV/R11_UEFI.fd"
+preflight = ["scripts/check-r11.py"]
+submodules = ["Common/Mu", "Common/Mu_OEM_Sample"]
+patches = []
+packages = [
+  "{uefi}",
+  "{uefi}/Platforms/OPPO",
+  "{tree}/package",
+  "{tree}/drivers/DarwinBoot",
+  "{edk2}",
+  "{uefi}/Common/Mu",
+  "{uefi}/Common/Mu_OEM_Sample",
+  "{uefi}/Silicon/Qualcomm",
+  "{uefi}/Silicon/Silicium",
+]
+
+[firmware.defines]
+DEVICE_MODEL = "r11"
+ENABLE_SECUREBOOT = "0"
+# SDM660 GCD does not accept the 0xFFFFFFFF attribute HeapGuard wants.
+MEMORY_PROTECTION = "FALSE"
+SHIP_MODE = "FALSE"
+BUILDID_STRING = "r11"
+
+[payload]
+volume = "R11ESP"
+# The image is booted with "fastboot boot": boot is only 64 MiB
+# (GPT: 245760-376831), so a flashed image has to stay under that.
+size_mib = 192
+loader = "firmware"
+title = "Boot"
+dram_size = "0xFE4C0000"      # must equal the /memory reg in dts/r11.dts
+kernel_args = [
+  # Console: -v plus serial=3 for a soldered UART; offline-legacy-gop=1 routes
+  # the kernel console through the GOP framebuffer SimpleFbDxe publishes, which
+  # is the only display path until a native MDSS driver exists.
+  "-v",
+  "serial=3",
+  "debug=0x14e",
+  "kt_fixed_zones=120",
+  "armcpu-diagnostics=1",
+  # offline-legacy-* and offline-* are read by the arch patch series; the values
+  # below match the SDM660 platform (one GICv3, 4+4 CPU layout, no SEP).
+  "offline-legacy-register=1",
+  "offline-legacy-gop=1",
+  "offline-legacy-unit-scale=2",
+  "offline-legacy-pm=1",
+  "offline-legacy-validate=1",
+  "offline-legacy-transfer=1",
+  "offline-legacy-cpu-present=1",
+  "offline-legacy-phase=4",
+  "offline-mobile-graphics-client=1",
+  "offline-mobile-graphics-load=1",
+  "offline-apfs-load=1",
+  # xnu connects the persistent Data volume from the offline owner cache; the
+  # APFS shared-datavolume path does not apply to that layout.
+  "offline-key-events=1",
+]
+
+[payload.adt]
+# Platform identity is spoofed to the OS profile reference machine (iPad7,1);
+# it is unrelated to the physical SoC. The seed itself never enters the repo.
+chip_id = "207"
+owned_memory_size = "0xC0000000"   # 3 GiB of the 3.98 GiB handoff, 2 MiB aligned
+unique_chip_id = "required"
+packed_data_ramdisk = false        # RAMDisk key: no NativeRamBlock driver yet
+persistent_data = true
+# root_match_volume_uuid stays unset until the userdata image exists: a wrong
+# UUID makes XNU fail to match the APFS root volume. After
+# "./unixnu build userdata" write the volume UUID back here, for example:
+# root_match_volume_uuid = "00000000-0000-0000-0000-000000000000"
+
+[bootimg.image]
+# Stock OTA boot.img header (inputs/hw.json boot_image): header_version 0,
+# page 4096, kernel 0x8000, ramdisk 0x1000000, tags 0x100, second 0xf00000.
+base = 0x0
+kernel_offset = 0x8000
+ramdisk_offset = 0x1000000
+tags_offset = 0x100
+second_offset = 0xf00000
+pagesize = 4096
+header_version = 0
+
+# No [[bootimg.dtb_node]]: the stock R11 device tree already carries
+# /reserved-memory/splash_region (0x9d400000 + 0x2400000), so fdtput would fail
+# with FDT_ERR_EXISTS. Patch nodes only when a DTB without splash is used.

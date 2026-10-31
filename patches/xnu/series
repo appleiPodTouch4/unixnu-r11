@@ -1,0 +1,11 @@
+# Board patch paths, one per line in application order.
+#
+# The OS profile series is deliberately not listed in board.toml: its
+# zzz-boot-progress.patch has hunks against sheng_pmgr_run() and
+# sheng_boot_watchdog_policy(), which only the SM8550 SoC patches provide. The
+# board copy below keeps every other checkpoint of that patch.
+#
+# Keep the XnuPrelink patches here because dropping the OS series drops them too.
+zzz-boot-progress.patch
+component:XnuPrelink/patches/xnu-10063.141.1-security-init.patch
+component:XnuPrelink/patches/xnu-10063.141.1-sparse-index.patch

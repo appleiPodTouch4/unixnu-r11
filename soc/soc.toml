@@ -1,0 +1,23 @@
+schema_version = 2
+
+# Shared support for Qualcomm SDM660 (Snapdragon 660, msm-4.4 era).
+#
+# Sources: the stock device trees extracted from the OPPO R11 boot image
+# (see ./../inputs/r11-stock.dts) and the SDM660 CLO kernel sources.
+# Only what the XNU side needs is described here; the UEFI platform lives in
+# ../../uefi-r11/Platforms/OPPO/r11Pkg.
+
+[soc]
+name = "sdm660"
+description = "Qualcomm SDM660 / SDM660 + PM660 + PM660L"
+source_repository = "https://github.com/LineageOS/android_kernel_qcom_sdm660"
+source_revision = "unpinned"
+
+[components]
+# ArmCpu and ArmDTPlatform carry the generic ARM64 platform expert; the SDM660
+# specific pieces (SMMU, display, storage) are board components today.
+include = ["ArmCpu", "ArmDTPlatform"]
+
+[kernel]
+config_fragments = ["soc:configs/sdm660.config"]
+patch_series = ["soc:patches/xnu/series"]

@@ -1,0 +1,1430 @@
+{
+  "model": "Qualcomm Technologies, Inc. SDM 660 PM660 + PM660A MTP",
+  "compatible": [
+    "qcom,sdm660-mtp",
+    "qcom,sdm660",
+    "qcom,mtp"
+  ],
+  "memory": {
+    "banks": [
+      [
+        "0x80000000",
+        "0x80000000"
+      ],
+      [
+        "0x100000000",
+        "0x7E4C0000"
+      ]
+    ],
+    "dram_base": "0x80000000",
+    "dram_size_total": 4266393600,
+    "note": "the stock tree zeroes /memory reg; ABL patches it from SMEM at boot. dram_size_total is taken from the measured 4 GiB unit (0xFE4C0000)."
+  },
+  "cpus": [
+    {
+      "node": "cpu@0",
+      "reg": [
+        "0x0",
+        "0x0"
+      ],
+      "compatible": "arm,armv8"
+    },
+    {
+      "node": "cpu@1",
+      "reg": [
+        "0x0",
+        "0x1"
+      ],
+      "compatible": "arm,armv8"
+    },
+    {
+      "node": "cpu@2",
+      "reg": [
+        "0x0",
+        "0x2"
+      ],
+      "compatible": "arm,armv8"
+    },
+    {
+      "node": "cpu@3",
+      "reg": [
+        "0x0",
+        "0x3"
+      ],
+      "compatible": "arm,armv8"
+    },
+    {
+      "node": "cpu@100",
+      "reg": [
+        "0x0",
+        "0x100"
+      ],
+      "compatible": "arm,armv8"
+    },
+    {
+      "node": "cpu@101",
+      "reg": [
+        "0x0",
+        "0x101"
+      ],
+      "compatible": "arm,armv8"
+    },
+    {
+      "node": "cpu@102",
+      "reg": [
+        "0x0",
+        "0x102"
+      ],
+      "compatible": "arm,armv8"
+    },
+    {
+      "node": "cpu@103",
+      "reg": [
+        "0x0",
+        "0x103"
+      ],
+      "compatible": "arm,armv8"
+    }
+  ],
+  "timebase_frequency": null,
+  "reserved_memory": [
+    {
+      "node": "removed_regions@85800000",
+      "reg": [
+        [
+          "0x85800000",
+          "0x3700000"
+        ]
+      ],
+      "no_map": true
+    },
+    {
+      "node": "modem_fw_region@8ac00000",
+      "reg": [
+        [
+          "0x8ac00000",
+          "0x7e00000"
+        ]
+      ],
+      "no_map": true
+    },
+    {
+      "node": "adsp_fw_region@92a00000",
+      "reg": [
+        [
+          "0x92a00000",
+          "0x2000000"
+        ]
+      ],
+      "no_map": true
+    },
+    {
+      "node": "pil_mba_region@94a00000",
+      "reg": [
+        [
+          "0x94a00000",
+          "0x200000"
+        ]
+      ],
+      "no_map": true
+    },
+    {
+      "node": "cdsp_fw_region@94c00000",
+      "reg": [
+        [
+          "0x94c00000",
+          "0x600000"
+        ]
+      ],
+      "no_map": true
+    },
+    {
+      "node": "venus_fw_region",
+      "reg": [],
+      "no_map": false
+    },
+    {
+      "node": "adsp_region",
+      "reg": [],
+      "no_map": false
+    },
+    {
+      "node": "qseecom_region",
+      "reg": [],
+      "no_map": false
+    },
+    {
+      "node": "secure_region",
+      "reg": [],
+      "no_map": false
+    },
+    {
+      "node": "linux,cma",
+      "reg": [],
+      "no_map": false
+    },
+    {
+      "node": "splash_region@9d400000",
+      "reg": [
+        [
+          "0x9d400000",
+          "0x2400000"
+        ]
+      ],
+      "no_map": false
+    }
+  ],
+  "peripherals": {
+    "interrupt-controller": [
+      {
+        "node": "interrupt-controller@17a00000",
+        "compatible": "arm,gic-v3",
+        "reg": [
+          [
+            "0x17a00000",
+            "0x10000"
+          ],
+          [
+            "0x17b00000",
+            "0x100000"
+          ]
+        ],
+        "status": null
+      }
+    ],
+    "timer": [
+      {
+        "node": "timer",
+        "compatible": "arm,armv8-timer",
+        "reg": [],
+        "status": null
+      },
+      {
+        "node": "timer@17920000",
+        "compatible": "arm,armv7-timer-mem",
+        "reg": [
+          [
+            "0x17920000",
+            "0x1000"
+          ]
+        ],
+        "status": null
+      }
+    ],
+    "clock-controller": [
+      {
+        "node": "clock-controller@100000",
+        "compatible": [
+          "qcom,gcc-sdm660",
+          "syscon"
+        ],
+        "reg": [
+          [
+            "0x100000",
+            "0x94000"
+          ]
+        ],
+        "status": null
+      },
+      {
+        "node": "clock-controller@c8c0000",
+        "compatible": "qcom,mmcc-sdm660",
+        "reg": [
+          [
+            "0xc8c0000",
+            "0x40000"
+          ]
+        ],
+        "status": null
+      },
+      {
+        "node": "clock-controller@5065000",
+        "compatible": "qcom,gpu-sdm660",
+        "reg": [
+          [
+            "0x5065000",
+            "0x10000"
+          ]
+        ],
+        "status": null
+      }
+    ],
+    "sdhci": [
+      {
+        "node": "sdhci@c0c4000",
+        "compatible": "qcom,sdhci-msm-v5",
+        "reg": [
+          [
+            "0xc0c4000",
+            "0x1000"
+          ],
+          [
+            "0xc0c5000",
+            "0x1000"
+          ]
+        ],
+        "status": "ok"
+      },
+      {
+        "node": "sdhci@c084000",
+        "compatible": "qcom,sdhci-msm-v5",
+        "reg": [
+          [
+            "0xc084000",
+            "0x1000"
+          ]
+        ],
+        "status": "ok"
+      }
+    ],
+    "qcom,smem": [
+      {
+        "node": "qcom,smem@86000000",
+        "compatible": "qcom,smem",
+        "reg": [
+          [
+            "0x86000000",
+            "0x200000"
+          ],
+          [
+            "0x17911008",
+            "0x4"
+          ],
+          [
+            "0x778000",
+            "0x7000"
+          ],
+          [
+            "0x1fd4000",
+            "0x8"
+          ]
+        ],
+        "status": null
+      }
+    ],
+    "qcom,icnss": [
+      {
+        "node": "qcom,icnss@18800000",
+        "compatible": "qcom,icnss",
+        "reg": [
+          [
+            "0x18800000",
+            "0x800000"
+          ],
+          [
+            "0xa0000000",
+            "0x10000000"
+          ],
+          [
+            "0xb0000000",
+            "0x10000"
+          ]
+        ],
+        "status": null
+      }
+    ],
+    "qcom,msm-imem": [
+      {
+        "node": "qcom,msm-imem@146bf000",
+        "compatible": "qcom,msm-imem",
+        "reg": [
+          [
+            "0x146bf000",
+            "0x1000"
+          ]
+        ],
+        "status": null
+      }
+    ],
+    "qcom,kgsl-3d0": [
+      {
+        "node": "qcom,kgsl-3d0@5000000",
+        "compatible": [
+          "qcom,kgsl-3d0",
+          "qcom,kgsl-3d"
+        ],
+        "reg": [
+          [
+            "0x5000000",
+            "0x40000"
+          ],
+          [
+            "0x780000",
+            "0x6220"
+          ]
+        ],
+        "status": "ok"
+      }
+    ],
+    "arm,smmu-mmss": [
+      {
+        "node": "arm,smmu-mmss@cd00000",
+        "compatible": "qcom,smmu-v2",
+        "reg": [
+          [
+            "0xcd00000",
+            "0x40000"
+          ]
+        ],
+        "status": null
+      }
+    ],
+    "pinctrl": [
+      {
+        "node": "pinctrl@03000000",
+        "compatible": "qcom,sdm660-pinctrl",
+        "reg": [
+          [
+            "0x3000000",
+            "0xc00000"
+          ]
+        ],
+        "status": null
+      }
+    ],
+    "i2c": [
+      {
+        "node": "i2c@c175000",
+        "compatible": "qcom,i2c-msm-v2",
+        "reg": [
+          [
+            "0xc175000",
+            "0x600"
+          ]
+        ],
+        "status": "okay"
+      },
+      {
+        "node": "i2c@c176000",
+        "compatible": "qcom,i2c-msm-v2",
+        "reg": [
+          [
+            "0xc176000",
+            "0x600"
+          ]
+        ],
+        "status": "okay"
+      },
+      {
+        "node": "i2c@c177000",
+        "compatible": "qcom,i2c-msm-v2",
+        "reg": [
+          [
+            "0xc177000",
+            "0x600"
+          ]
+        ],
+        "status": "disabled"
+      },
+      {
+        "node": "i2c@c178000",
+        "compatible": "qcom,i2c-msm-v2",
+        "reg": [
+          [
+            "0xc178000",
+            "0x600"
+          ]
+        ],
+        "status": "disabled"
+      },
+      {
+        "node": "i2c@c1b5000",
+        "compatible": "qcom,i2c-msm-v2",
+        "reg": [
+          [
+            "0xc1b5000",
+            "0x600"
+          ]
+        ],
+        "status": "disabled"
+      },
+      {
+        "node": "i2c@c1b6000",
+        "compatible": "qcom,i2c-msm-v2",
+        "reg": [
+          [
+            "0xc1b6000",
+            "0x600"
+          ]
+        ],
+        "status": "okay"
+      },
+      {
+        "node": "i2c@c1b7000",
+        "compatible": "qcom,i2c-msm-v2",
+        "reg": [
+          [
+            "0xc1b7000",
+            "0x600"
+          ]
+        ],
+        "status": "disabled"
+      },
+      {
+        "node": "i2c@c1b8000",
+        "compatible": "qcom,i2c-msm-v2",
+        "reg": [
+          [
+            "0xc1b8000",
+            "0x600"
+          ]
+        ],
+        "status": "disabled"
+      }
+    ],
+    "uart": [
+      {
+        "node": "uart@c16f000",
+        "compatible": "qcom,msm-hsuart-v14",
+        "reg": [
+          [
+            "0xc16f000",
+            "0x200"
+          ],
+          [
+            "0xc144000",
+            "0x1f000"
+          ]
+        ],
+        "status": "disabled"
+      },
+      {
+        "node": "uart@c170000",
+        "compatible": "qcom,msm-hsuart-v14",
+        "reg": [
+          [
+            "0xc170000",
+            "0x200"
+          ],
+          [
+            "0xc144000",
+            "0x1f000"
+          ]
+        ],
+        "status": "disabled"
+      },
+      {
+        "node": "uart@c1af000",
+        "compatible": "qcom,msm-hsuart-v14",
+        "reg": [
+          [
+            "0xc1af000",
+            "0x200"
+          ],
+          [
+            "0xc184000",
+            "0x1f000"
+          ]
+        ],
+        "status": "ok"
+      },
+      {
+        "node": "uart@c1b0000",
+        "compatible": "qcom,msm-hsuart-v14",
+        "reg": [
+          [
+            "0xc1b0000",
+            "0x200"
+          ],
+          [
+            "0xc184000",
+            "0x1f000"
+          ]
+        ],
+        "status": "disabled"
+      }
+    ],
+    "qcom,mdss_mdp": [
+      {
+        "node": "qcom,mdss_mdp@c900000",
+        "compatible": "qcom,mdss_mdp",
+        "reg": [
+          [
+            "0xc900000",
+            "0x90000"
+          ],
+          [
+            "0xc9b0000",
+            "0x1040"
+          ]
+        ],
+        "status": "ok"
+      }
+    ]
+  },
+  "i2c": {
+    "i2c@c175000": {
+      "reg": [
+        [
+          "0xc175000",
+          "0x600"
+        ]
+      ],
+      "devices": [
+        {
+          "node": "synaptics16051@20",
+          "compatible": "synaptics-s3508"
+        }
+      ]
+    },
+    "i2c@c176000": {
+      "reg": [
+        [
+          "0xc176000",
+          "0x600"
+        ]
+      ],
+      "devices": [
+        {
+          "node": "bq27541-battery@55",
+          "compatible": "oppo,bq27541-battery"
+        },
+        {
+          "node": "stm8s_fastcg@26",
+          "compatible": "oppo,stm8s-fastcg"
+        },
+        {
+          "node": "pic16f_fastcg@25",
+          "compatible": "oppo,pic16f-fastcg"
+        }
+      ]
+    },
+    "i2c@c177000": {
+      "reg": [
+        [
+          "0xc177000",
+          "0x600"
+        ]
+      ],
+      "devices": []
+    },
+    "i2c@c178000": {
+      "reg": [
+        [
+          "0xc178000",
+          "0x600"
+        ]
+      ],
+      "devices": []
+    },
+    "i2c@c1b5000": {
+      "reg": [
+        [
+          "0xc1b5000",
+          "0x600"
+        ]
+      ],
+      "devices": []
+    },
+    "i2c@c1b6000": {
+      "reg": [
+        [
+          "0xc1b6000",
+          "0x600"
+        ]
+      ],
+      "devices": [
+        {
+          "node": "nq@28",
+          "compatible": "qcom,nq-nci"
+        },
+        {
+          "node": "ak4376@10",
+          "compatible": "akm,ak4376"
+        },
+        {
+          "node": "tfa98xx@36",
+          "compatible": "nxp,tfa98xx"
+        }
+      ]
+    },
+    "i2c@c1b7000": {
+      "reg": [
+        [
+          "0xc1b7000",
+          "0x600"
+        ]
+      ],
+      "devices": []
+    },
+    "i2c@c1b8000": {
+      "reg": [
+        [
+          "0xc1b8000",
+          "0x600"
+        ]
+      ],
+      "devices": []
+    }
+  },
+  "panel": {
+    "node": "qcom,mdss_dsi_oppo16051samsung_s6e3fa3_1080p_cmd",
+    "name": "oppo16051samsung s6e3fa3 1080p cmd mode dsi panel",
+    "width": [
+      "0x438"
+    ],
+    "height": [
+      "0x780"
+    ],
+    "lanes": "",
+    "fps": [
+      "0x3c"
+    ],
+    "panel_type": "dsi_cmd_mode",
+    "properties": 79
+  },
+  "chosen_bootargs": "rcupdate.rcu_expedited=1",
+  "boot_image": {
+    "path": "/Users/mry0000/Desktop/unixnu_r11/ofp_extracted/boot.img",
+    "header_version": "0x0",
+    "page_size": "0x1000",
+    "kernel_size": "0xc6c2b6",
+    "kernel_addr": "0x8000",
+    "ramdisk_size": "0x2cc981",
+    "ramdisk_addr": "0x1000000",
+    "second_size": "0x0",
+    "second_addr": "0xf00000",
+    "tags_addr": "0x100",
+    "board_name": "",
+    "cmdline": "console=ttyMSM0,115200,n8 androidboot.console=ttyMSM0 earlycon=msm_serial_dm,0xc170000 androidboot.hardware=qcom user_debug=31 msm_rtb.filter=0x37 ehci-hcd.park=3 lpm_levels.sleep_disabled=1 sched_enable_hmp=1 sched_enable_power_aware=1 androidboot.selinux=enforcing service_locator.enable=1 swiotlb=1 androidboot.configfs=true androidboot.usbcontroller=a800000.dwc3 buildvariant=user",
+    "image_bytes": "0xf3b514"
+  },
+  "device_tree": {
+    "board_id": [
+      8,
+      0,
+      16051
+    ],
+    "msm_id": [
+      317,
+      0
+    ],
+    "members": 3,
+    "bytes": 330172,
+    "version": 17
+  },
+  "gpt": {
+    "gpt_main0.bin": {
+      "path": "/Users/mry0000/Desktop/unixnu_r11/ofp_extracted/gpt_main0.bin",
+      "entry_count": 72,
+      "partitions": [
+        {
+          "index": 1,
+          "name": "oppodycnvbk",
+          "first_lba": 40,
+          "last_lba": 20519,
+          "grow": false,
+          "sectors": 20480,
+          "bytes": 10485760,
+          "attributes": "0x0"
+        },
+        {
+          "index": 2,
+          "name": "oppostanvbk",
+          "first_lba": 20520,
+          "last_lba": 40999,
+          "grow": false,
+          "sectors": 20480,
+          "bytes": 10485760,
+          "attributes": "0x0"
+        },
+        {
+          "index": 3,
+          "name": "modemst1",
+          "first_lba": 41000,
+          "last_lba": 45095,
+          "grow": false,
+          "sectors": 4096,
+          "bytes": 2097152,
+          "attributes": "0x0"
+        },
+        {
+          "index": 4,
+          "name": "modemst2",
+          "first_lba": 45096,
+          "last_lba": 49191,
+          "grow": false,
+          "sectors": 4096,
+          "bytes": 2097152,
+          "attributes": "0x0"
+        },
+        {
+          "index": 5,
+          "name": "persist",
+          "first_lba": 49192,
+          "last_lba": 114727,
+          "grow": false,
+          "sectors": 65536,
+          "bytes": 33554432,
+          "attributes": "0x0"
+        },
+        {
+          "index": 6,
+          "name": "reserve1",
+          "first_lba": 114728,
+          "last_lba": 118823,
+          "grow": false,
+          "sectors": 4096,
+          "bytes": 2097152,
+          "attributes": "0x0"
+        },
+        {
+          "index": 7,
+          "name": "reserve2",
+          "first_lba": 118824,
+          "last_lba": 151591,
+          "grow": false,
+          "sectors": 32768,
+          "bytes": 16777216,
+          "attributes": "0x0"
+        },
+        {
+          "index": 8,
+          "name": "reserve3",
+          "first_lba": 151592,
+          "last_lba": 155687,
+          "grow": false,
+          "sectors": 4096,
+          "bytes": 2097152,
+          "attributes": "0x0"
+        },
+        {
+          "index": 9,
+          "name": "reserve4",
+          "first_lba": 155688,
+          "last_lba": 188455,
+          "grow": false,
+          "sectors": 32768,
+          "bytes": 16777216,
+          "attributes": "0x0"
+        },
+        {
+          "index": 10,
+          "name": "xbl",
+          "first_lba": 196608,
+          "last_lba": 203775,
+          "grow": false,
+          "sectors": 7168,
+          "bytes": 3670016,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 11,
+          "name": "xblbak",
+          "first_lba": 203776,
+          "last_lba": 210943,
+          "grow": false,
+          "sectors": 7168,
+          "bytes": 3670016,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 12,
+          "name": "tz",
+          "first_lba": 210944,
+          "last_lba": 219135,
+          "grow": false,
+          "sectors": 8192,
+          "bytes": 4194304,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 13,
+          "name": "tzbak",
+          "first_lba": 219136,
+          "last_lba": 227327,
+          "grow": false,
+          "sectors": 8192,
+          "bytes": 4194304,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 14,
+          "name": "rpm",
+          "first_lba": 227328,
+          "last_lba": 228351,
+          "grow": false,
+          "sectors": 1024,
+          "bytes": 524288,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 15,
+          "name": "rpmbak",
+          "first_lba": 228352,
+          "last_lba": 229375,
+          "grow": false,
+          "sectors": 1024,
+          "bytes": 524288,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 16,
+          "name": "hyp",
+          "first_lba": 229376,
+          "last_lba": 230399,
+          "grow": false,
+          "sectors": 1024,
+          "bytes": 524288,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 17,
+          "name": "hypbak",
+          "first_lba": 230400,
+          "last_lba": 231423,
+          "grow": false,
+          "sectors": 1024,
+          "bytes": 524288,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 18,
+          "name": "pmic",
+          "first_lba": 231424,
+          "last_lba": 232447,
+          "grow": false,
+          "sectors": 1024,
+          "bytes": 524288,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 19,
+          "name": "pmicbak",
+          "first_lba": 232448,
+          "last_lba": 233471,
+          "grow": false,
+          "sectors": 1024,
+          "bytes": 524288,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 20,
+          "name": "fsg",
+          "first_lba": 233472,
+          "last_lba": 237567,
+          "grow": false,
+          "sectors": 4096,
+          "bytes": 2097152,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 21,
+          "name": "boot",
+          "first_lba": 245760,
+          "last_lba": 376831,
+          "grow": false,
+          "sectors": 131072,
+          "bytes": 67108864,
+          "attributes": "0x0"
+        },
+        {
+          "index": 22,
+          "name": "bootbak",
+          "first_lba": 376832,
+          "last_lba": 507903,
+          "grow": false,
+          "sectors": 131072,
+          "bytes": 67108864,
+          "attributes": "0x0"
+        },
+        {
+          "index": 23,
+          "name": "recovery",
+          "first_lba": 507904,
+          "last_lba": 638975,
+          "grow": false,
+          "sectors": 131072,
+          "bytes": 67108864,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 24,
+          "name": "keymaster",
+          "first_lba": 638976,
+          "last_lba": 641023,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 25,
+          "name": "keymasterbak",
+          "first_lba": 641024,
+          "last_lba": 643071,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 26,
+          "name": "cmnlib",
+          "first_lba": 643072,
+          "last_lba": 645119,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 27,
+          "name": "cmnlib64",
+          "first_lba": 645120,
+          "last_lba": 647167,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 28,
+          "name": "cmnlibbak",
+          "first_lba": 647168,
+          "last_lba": 649215,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 29,
+          "name": "cmnlib64bak",
+          "first_lba": 649216,
+          "last_lba": 651263,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 30,
+          "name": "mdtpsecapp",
+          "first_lba": 651264,
+          "last_lba": 659455,
+          "grow": false,
+          "sectors": 8192,
+          "bytes": 4194304,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 31,
+          "name": "mdtpsecappbak",
+          "first_lba": 659456,
+          "last_lba": 667647,
+          "grow": false,
+          "sectors": 8192,
+          "bytes": 4194304,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 32,
+          "name": "mdtp",
+          "first_lba": 667648,
+          "last_lba": 733183,
+          "grow": false,
+          "sectors": 65536,
+          "bytes": 33554432,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 33,
+          "name": "mdtpbak",
+          "first_lba": 733184,
+          "last_lba": 798719,
+          "grow": false,
+          "sectors": 65536,
+          "bytes": 33554432,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 34,
+          "name": "dsp",
+          "first_lba": 798720,
+          "last_lba": 831487,
+          "grow": false,
+          "sectors": 32768,
+          "bytes": 16777216,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 35,
+          "name": "dspbak",
+          "first_lba": 831488,
+          "last_lba": 864255,
+          "grow": false,
+          "sectors": 32768,
+          "bytes": 16777216,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 36,
+          "name": "abl",
+          "first_lba": 864256,
+          "last_lba": 866303,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 37,
+          "name": "ablbak",
+          "first_lba": 866304,
+          "last_lba": 868351,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 38,
+          "name": "dip",
+          "first_lba": 868352,
+          "last_lba": 870399,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 39,
+          "name": "devinfo",
+          "first_lba": 870400,
+          "last_lba": 870401,
+          "grow": false,
+          "sectors": 2,
+          "bytes": 1024,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 40,
+          "name": "apdp",
+          "first_lba": 870408,
+          "last_lba": 870919,
+          "grow": false,
+          "sectors": 512,
+          "bytes": 262144,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 41,
+          "name": "msadp",
+          "first_lba": 870920,
+          "last_lba": 871431,
+          "grow": false,
+          "sectors": 512,
+          "bytes": 262144,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 42,
+          "name": "dpo",
+          "first_lba": 871432,
+          "last_lba": 871433,
+          "grow": false,
+          "sectors": 2,
+          "bytes": 1024,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 43,
+          "name": "splash",
+          "first_lba": 871440,
+          "last_lba": 938287,
+          "grow": false,
+          "sectors": 66848,
+          "bytes": 34226176,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 44,
+          "name": "limits",
+          "first_lba": 938288,
+          "last_lba": 938295,
+          "grow": false,
+          "sectors": 8,
+          "bytes": 4096,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 45,
+          "name": "toolsfv",
+          "first_lba": 938296,
+          "last_lba": 940343,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 46,
+          "name": "logfs",
+          "first_lba": 950272,
+          "last_lba": 966655,
+          "grow": false,
+          "sectors": 16384,
+          "bytes": 8388608,
+          "attributes": "0x0"
+        },
+        {
+          "index": 47,
+          "name": "ddr",
+          "first_lba": 966656,
+          "last_lba": 968703,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 48,
+          "name": "sec",
+          "first_lba": 968704,
+          "last_lba": 968735,
+          "grow": false,
+          "sectors": 32,
+          "bytes": 16384,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 49,
+          "name": "bluetooth",
+          "first_lba": 968736,
+          "last_lba": 970783,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 50,
+          "name": "bluetoothbak",
+          "first_lba": 970784,
+          "last_lba": 972831,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 51,
+          "name": "fsc",
+          "first_lba": 983040,
+          "last_lba": 983041,
+          "grow": false,
+          "sectors": 2,
+          "bytes": 1024,
+          "attributes": "0x0"
+        },
+        {
+          "index": 52,
+          "name": "ssd",
+          "first_lba": 983048,
+          "last_lba": 983063,
+          "grow": false,
+          "sectors": 16,
+          "bytes": 8192,
+          "attributes": "0x0"
+        },
+        {
+          "index": 53,
+          "name": "misc",
+          "first_lba": 983064,
+          "last_lba": 985111,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x0"
+        },
+        {
+          "index": 54,
+          "name": "keystore",
+          "first_lba": 985112,
+          "last_lba": 986135,
+          "grow": false,
+          "sectors": 1024,
+          "bytes": 524288,
+          "attributes": "0x0"
+        },
+        {
+          "index": 55,
+          "name": "devcfg",
+          "first_lba": 986136,
+          "last_lba": 988183,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x0"
+        },
+        {
+          "index": 56,
+          "name": "devcfgbak",
+          "first_lba": 988184,
+          "last_lba": 990231,
+          "grow": false,
+          "sectors": 2048,
+          "bytes": 1048576,
+          "attributes": "0x0"
+        },
+        {
+          "index": 57,
+          "name": "frp",
+          "first_lba": 990232,
+          "last_lba": 991255,
+          "grow": false,
+          "sectors": 1024,
+          "bytes": 524288,
+          "attributes": "0x0"
+        },
+        {
+          "index": 58,
+          "name": "logdump",
+          "first_lba": 991256,
+          "last_lba": 1122327,
+          "grow": false,
+          "sectors": 131072,
+          "bytes": 67108864,
+          "attributes": "0x0"
+        },
+        {
+          "index": 59,
+          "name": "sti",
+          "first_lba": 1122328,
+          "last_lba": 1126423,
+          "grow": false,
+          "sectors": 4096,
+          "bytes": 2097152,
+          "attributes": "0x0"
+        },
+        {
+          "index": 60,
+          "name": "LOGO",
+          "first_lba": 1126424,
+          "last_lba": 1159191,
+          "grow": false,
+          "sectors": 32768,
+          "bytes": 16777216,
+          "attributes": "0x0"
+        },
+        {
+          "index": 61,
+          "name": "DRIVER",
+          "first_lba": 1159192,
+          "last_lba": 1224727,
+          "grow": false,
+          "sectors": 65536,
+          "bytes": 33554432,
+          "attributes": "0x0"
+        },
+        {
+          "index": 62,
+          "name": "vbmeta",
+          "first_lba": 1228800,
+          "last_lba": 1228927,
+          "grow": false,
+          "sectors": 128,
+          "bytes": 65536,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 63,
+          "name": "vbmetabak",
+          "first_lba": 1228928,
+          "last_lba": 1229055,
+          "grow": false,
+          "sectors": 128,
+          "bytes": 65536,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 64,
+          "name": "modem",
+          "first_lba": 1229056,
+          "last_lba": 1491199,
+          "grow": false,
+          "sectors": 262144,
+          "bytes": 134217728,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 65,
+          "name": "cache",
+          "first_lba": 1507328,
+          "last_lba": 2031615,
+          "grow": false,
+          "sectors": 524288,
+          "bytes": 268435456,
+          "attributes": "0x0"
+        },
+        {
+          "index": 66,
+          "name": "system",
+          "first_lba": 2031616,
+          "last_lba": 8830975,
+          "grow": false,
+          "sectors": 6799360,
+          "bytes": 3481272320,
+          "attributes": "0x0"
+        },
+        {
+          "index": 67,
+          "name": "vendor",
+          "first_lba": 8830976,
+          "last_lba": 10928127,
+          "grow": false,
+          "sectors": 2097152,
+          "bytes": 1073741824,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 68,
+          "name": "storsec",
+          "first_lba": 10928128,
+          "last_lba": 10928383,
+          "grow": false,
+          "sectors": 256,
+          "bytes": 131072,
+          "attributes": "0x1000000000000000"
+        },
+        {
+          "index": 69,
+          "name": "userdata",
+          "first_lba": 10944512,
+          "last_lba": null,
+          "grow": true,
+          "sectors": 0,
+          "bytes": 0,
+          "attributes": "0x0"
+        }
+      ]
+    },
+    "gpt_main2.bin": {
+      "path": "/Users/mry0000/Desktop/unixnu_r11/ofp_extracted/gpt_main2.bin",
+      "entry_count": 4,
+      "partitions": [
+        {
+          "index": 1,
+          "name": "CDT",
+          "first_lba": 34,
+          "last_lba": 37,
+          "grow": false,
+          "sectors": 4,
+          "bytes": 2048,
+          "attributes": "0x0"
+        },
+        {
+          "index": 2,
+          "name": "last_grow",
+          "first_lba": 38,
+          "last_lba": null,
+          "grow": true,
+          "sectors": 0,
+          "bytes": 0,
+          "attributes": "0x0"
+        }
+      ]
+    }
+  }
+}

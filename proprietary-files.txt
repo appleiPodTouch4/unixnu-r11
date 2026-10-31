@@ -1,0 +1,25 @@
+# Required firmware inputs: relative path | source | SHA-256 | consumer
+#
+# "Source" is where the file came from. Everything here is extracted from the
+# OPPO R11 OFP package (Android 7.1.1 / ColorOS 3.5, model 16051) by
+# scripts/extract-inputs.py, or listed as pending with the partition it must be
+# read from on the device.
+#
+# Consumer key:  firmware = UEFI platform (uefi-r11), bootimg = boot image
+#                assembly, kernel = XNU board driver.
+
+inputs/r11-stock.dtb | ofp:boot.img (appended multi-DTB, board-id 0x8/0x3eb3) | 642cfb77bf5cdfedf2d14591df46eab0e8b76f91d2288c0b0aa5c519cd79ba11 | bootimg, firmware
+inputs/hw.json | scripts/extract-inputs.py --ofp ../ofp_extracted | d60640c605c7a964509fb96f4404146455e6775b18193407cdbe8828b939c7c5 | board.toml, dts, firmware
+inputs/partitions.json | ofp:gpt_main0.bin, gpt_main2.bin | e8a047c99c60ac7ae5ad09cad8f79f73539d1ebddd6434be0b1a4f33f98f6126 | board.toml [userdata]
+
+# Pending: panel initialisation sequence, currently replayed from the stock
+# device tree node /soc/qcom,mdss_mdp@c900000/qcom,mdss_dsi_oppo16051samsung_s6e3fa3_1080p_cmd
+# (extract with scripts/split-panel.py once the R11 panel driver is written).
+# proprietary/panel-oppo16051.json | ofp:boot.img device tree | - | kernel, firmware
+
+# Pending: Synaptics S3508 touch firmware, read from the touch IC at bring-up.
+# proprietary/s3508-firmware.bin | device: i2c@c175000 0x20 (RMI4 function 0x80) | - | kernel
+
+# Pending: charger and battery profiles for the vendor UEFI drivers.
+# proprietary/QcomChargerCfg.cfg | device: splash/charger partition | - | firmware
+# proprietary/BATTERY.PROVISION | device: splash partition | - | firmware

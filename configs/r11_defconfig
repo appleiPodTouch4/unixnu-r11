@@ -1,0 +1,31 @@
+# OPPO R11 (r11) kernel configuration, applied after the arch, SoC and OS fragments.
+CONFIG_XNU_BUILD_ARCHIVES=y
+CONFIG_XNU_SOURCE_CORECRYPTO14=y
+CONFIG_XNU_SOURCE_PTHREAD=y
+CONFIG_XNU_SOURCE_MOCKFS=y
+CONFIG_XNU_ARM_DT_PLATFORM=y
+CONFIG_XNU_ARMCPU=y
+CONFIG_XNU_NATIVE_AES=y
+CONFIG_XNU_NATIVE_ARCH_TIMER=y
+# The R11 has no native PAN implementation in the payload yet.
+CONFIG_XNU_NATIVE_PAN=n
+# No board driver for the eMMC controller, the panel or the touch sensor yet, so
+# the first bring-up runs the kernel against a mockfs root.
+CONFIG_XNU_NATIVE_UFS=n
+CONFIG_XNU_NATIVE_RAM_BLOCK=n
+CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n
+CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
+# Needs build/boot-progress/libBootProgress.a, which this board does not ship
+# yet (sheng's BootProgress.c is 83 KB of its own display code). Off until the
+# board provides an implementation.
+CONFIG_XNU_BOOT_PROGRESS=n
+CONFIG_XNU_DT_PANIC_REGION=y
+CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE=y
+# The owner mount chain is gated: DATA_MOUNT needs BOOT_MANIFEST, which needs
+# CACHE_STARTUP, which needs CACHE_MOUNT, which needs ROOT_TRUST, which needs
+# ROOT_AUDIT, which needs VERIFIED_ROOT_PROBE -- and that last one needs the
+# signed policy and a block driver. First bring-up mounts the mockfs root, so
+# the whole chain stays off; turn it on with the storage driver.
+CONFIG_XNU_OWNER_DATA_MOUNT=n
+CONFIG_XNU_OWNER_UNION_SYSTEMOS=n
+CONFIG_XNU_EXTRA_LD_ARCHIVES=""

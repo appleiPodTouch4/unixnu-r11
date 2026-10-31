@@ -1,0 +1,724 @@
+{
+  "gpt_main0.bin": {
+    "path": "/Users/mry0000/Desktop/unixnu_r11/ofp_extracted/gpt_main0.bin",
+    "entry_count": 72,
+    "partitions": [
+      {
+        "index": 1,
+        "name": "oppodycnvbk",
+        "first_lba": 40,
+        "last_lba": 20519,
+        "grow": false,
+        "sectors": 20480,
+        "bytes": 10485760,
+        "attributes": "0x0"
+      },
+      {
+        "index": 2,
+        "name": "oppostanvbk",
+        "first_lba": 20520,
+        "last_lba": 40999,
+        "grow": false,
+        "sectors": 20480,
+        "bytes": 10485760,
+        "attributes": "0x0"
+      },
+      {
+        "index": 3,
+        "name": "modemst1",
+        "first_lba": 41000,
+        "last_lba": 45095,
+        "grow": false,
+        "sectors": 4096,
+        "bytes": 2097152,
+        "attributes": "0x0"
+      },
+      {
+        "index": 4,
+        "name": "modemst2",
+        "first_lba": 45096,
+        "last_lba": 49191,
+        "grow": false,
+        "sectors": 4096,
+        "bytes": 2097152,
+        "attributes": "0x0"
+      },
+      {
+        "index": 5,
+        "name": "persist",
+        "first_lba": 49192,
+        "last_lba": 114727,
+        "grow": false,
+        "sectors": 65536,
+        "bytes": 33554432,
+        "attributes": "0x0"
+      },
+      {
+        "index": 6,
+        "name": "reserve1",
+        "first_lba": 114728,
+        "last_lba": 118823,
+        "grow": false,
+        "sectors": 4096,
+        "bytes": 2097152,
+        "attributes": "0x0"
+      },
+      {
+        "index": 7,
+        "name": "reserve2",
+        "first_lba": 118824,
+        "last_lba": 151591,
+        "grow": false,
+        "sectors": 32768,
+        "bytes": 16777216,
+        "attributes": "0x0"
+      },
+      {
+        "index": 8,
+        "name": "reserve3",
+        "first_lba": 151592,
+        "last_lba": 155687,
+        "grow": false,
+        "sectors": 4096,
+        "bytes": 2097152,
+        "attributes": "0x0"
+      },
+      {
+        "index": 9,
+        "name": "reserve4",
+        "first_lba": 155688,
+        "last_lba": 188455,
+        "grow": false,
+        "sectors": 32768,
+        "bytes": 16777216,
+        "attributes": "0x0"
+      },
+      {
+        "index": 10,
+        "name": "xbl",
+        "first_lba": 196608,
+        "last_lba": 203775,
+        "grow": false,
+        "sectors": 7168,
+        "bytes": 3670016,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 11,
+        "name": "xblbak",
+        "first_lba": 203776,
+        "last_lba": 210943,
+        "grow": false,
+        "sectors": 7168,
+        "bytes": 3670016,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 12,
+        "name": "tz",
+        "first_lba": 210944,
+        "last_lba": 219135,
+        "grow": false,
+        "sectors": 8192,
+        "bytes": 4194304,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 13,
+        "name": "tzbak",
+        "first_lba": 219136,
+        "last_lba": 227327,
+        "grow": false,
+        "sectors": 8192,
+        "bytes": 4194304,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 14,
+        "name": "rpm",
+        "first_lba": 227328,
+        "last_lba": 228351,
+        "grow": false,
+        "sectors": 1024,
+        "bytes": 524288,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 15,
+        "name": "rpmbak",
+        "first_lba": 228352,
+        "last_lba": 229375,
+        "grow": false,
+        "sectors": 1024,
+        "bytes": 524288,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 16,
+        "name": "hyp",
+        "first_lba": 229376,
+        "last_lba": 230399,
+        "grow": false,
+        "sectors": 1024,
+        "bytes": 524288,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 17,
+        "name": "hypbak",
+        "first_lba": 230400,
+        "last_lba": 231423,
+        "grow": false,
+        "sectors": 1024,
+        "bytes": 524288,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 18,
+        "name": "pmic",
+        "first_lba": 231424,
+        "last_lba": 232447,
+        "grow": false,
+        "sectors": 1024,
+        "bytes": 524288,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 19,
+        "name": "pmicbak",
+        "first_lba": 232448,
+        "last_lba": 233471,
+        "grow": false,
+        "sectors": 1024,
+        "bytes": 524288,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 20,
+        "name": "fsg",
+        "first_lba": 233472,
+        "last_lba": 237567,
+        "grow": false,
+        "sectors": 4096,
+        "bytes": 2097152,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 21,
+        "name": "boot",
+        "first_lba": 245760,
+        "last_lba": 376831,
+        "grow": false,
+        "sectors": 131072,
+        "bytes": 67108864,
+        "attributes": "0x0"
+      },
+      {
+        "index": 22,
+        "name": "bootbak",
+        "first_lba": 376832,
+        "last_lba": 507903,
+        "grow": false,
+        "sectors": 131072,
+        "bytes": 67108864,
+        "attributes": "0x0"
+      },
+      {
+        "index": 23,
+        "name": "recovery",
+        "first_lba": 507904,
+        "last_lba": 638975,
+        "grow": false,
+        "sectors": 131072,
+        "bytes": 67108864,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 24,
+        "name": "keymaster",
+        "first_lba": 638976,
+        "last_lba": 641023,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 25,
+        "name": "keymasterbak",
+        "first_lba": 641024,
+        "last_lba": 643071,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 26,
+        "name": "cmnlib",
+        "first_lba": 643072,
+        "last_lba": 645119,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 27,
+        "name": "cmnlib64",
+        "first_lba": 645120,
+        "last_lba": 647167,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 28,
+        "name": "cmnlibbak",
+        "first_lba": 647168,
+        "last_lba": 649215,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 29,
+        "name": "cmnlib64bak",
+        "first_lba": 649216,
+        "last_lba": 651263,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 30,
+        "name": "mdtpsecapp",
+        "first_lba": 651264,
+        "last_lba": 659455,
+        "grow": false,
+        "sectors": 8192,
+        "bytes": 4194304,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 31,
+        "name": "mdtpsecappbak",
+        "first_lba": 659456,
+        "last_lba": 667647,
+        "grow": false,
+        "sectors": 8192,
+        "bytes": 4194304,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 32,
+        "name": "mdtp",
+        "first_lba": 667648,
+        "last_lba": 733183,
+        "grow": false,
+        "sectors": 65536,
+        "bytes": 33554432,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 33,
+        "name": "mdtpbak",
+        "first_lba": 733184,
+        "last_lba": 798719,
+        "grow": false,
+        "sectors": 65536,
+        "bytes": 33554432,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 34,
+        "name": "dsp",
+        "first_lba": 798720,
+        "last_lba": 831487,
+        "grow": false,
+        "sectors": 32768,
+        "bytes": 16777216,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 35,
+        "name": "dspbak",
+        "first_lba": 831488,
+        "last_lba": 864255,
+        "grow": false,
+        "sectors": 32768,
+        "bytes": 16777216,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 36,
+        "name": "abl",
+        "first_lba": 864256,
+        "last_lba": 866303,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 37,
+        "name": "ablbak",
+        "first_lba": 866304,
+        "last_lba": 868351,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 38,
+        "name": "dip",
+        "first_lba": 868352,
+        "last_lba": 870399,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 39,
+        "name": "devinfo",
+        "first_lba": 870400,
+        "last_lba": 870401,
+        "grow": false,
+        "sectors": 2,
+        "bytes": 1024,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 40,
+        "name": "apdp",
+        "first_lba": 870408,
+        "last_lba": 870919,
+        "grow": false,
+        "sectors": 512,
+        "bytes": 262144,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 41,
+        "name": "msadp",
+        "first_lba": 870920,
+        "last_lba": 871431,
+        "grow": false,
+        "sectors": 512,
+        "bytes": 262144,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 42,
+        "name": "dpo",
+        "first_lba": 871432,
+        "last_lba": 871433,
+        "grow": false,
+        "sectors": 2,
+        "bytes": 1024,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 43,
+        "name": "splash",
+        "first_lba": 871440,
+        "last_lba": 938287,
+        "grow": false,
+        "sectors": 66848,
+        "bytes": 34226176,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 44,
+        "name": "limits",
+        "first_lba": 938288,
+        "last_lba": 938295,
+        "grow": false,
+        "sectors": 8,
+        "bytes": 4096,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 45,
+        "name": "toolsfv",
+        "first_lba": 938296,
+        "last_lba": 940343,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 46,
+        "name": "logfs",
+        "first_lba": 950272,
+        "last_lba": 966655,
+        "grow": false,
+        "sectors": 16384,
+        "bytes": 8388608,
+        "attributes": "0x0"
+      },
+      {
+        "index": 47,
+        "name": "ddr",
+        "first_lba": 966656,
+        "last_lba": 968703,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 48,
+        "name": "sec",
+        "first_lba": 968704,
+        "last_lba": 968735,
+        "grow": false,
+        "sectors": 32,
+        "bytes": 16384,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 49,
+        "name": "bluetooth",
+        "first_lba": 968736,
+        "last_lba": 970783,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 50,
+        "name": "bluetoothbak",
+        "first_lba": 970784,
+        "last_lba": 972831,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 51,
+        "name": "fsc",
+        "first_lba": 983040,
+        "last_lba": 983041,
+        "grow": false,
+        "sectors": 2,
+        "bytes": 1024,
+        "attributes": "0x0"
+      },
+      {
+        "index": 52,
+        "name": "ssd",
+        "first_lba": 983048,
+        "last_lba": 983063,
+        "grow": false,
+        "sectors": 16,
+        "bytes": 8192,
+        "attributes": "0x0"
+      },
+      {
+        "index": 53,
+        "name": "misc",
+        "first_lba": 983064,
+        "last_lba": 985111,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x0"
+      },
+      {
+        "index": 54,
+        "name": "keystore",
+        "first_lba": 985112,
+        "last_lba": 986135,
+        "grow": false,
+        "sectors": 1024,
+        "bytes": 524288,
+        "attributes": "0x0"
+      },
+      {
+        "index": 55,
+        "name": "devcfg",
+        "first_lba": 986136,
+        "last_lba": 988183,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x0"
+      },
+      {
+        "index": 56,
+        "name": "devcfgbak",
+        "first_lba": 988184,
+        "last_lba": 990231,
+        "grow": false,
+        "sectors": 2048,
+        "bytes": 1048576,
+        "attributes": "0x0"
+      },
+      {
+        "index": 57,
+        "name": "frp",
+        "first_lba": 990232,
+        "last_lba": 991255,
+        "grow": false,
+        "sectors": 1024,
+        "bytes": 524288,
+        "attributes": "0x0"
+      },
+      {
+        "index": 58,
+        "name": "logdump",
+        "first_lba": 991256,
+        "last_lba": 1122327,
+        "grow": false,
+        "sectors": 131072,
+        "bytes": 67108864,
+        "attributes": "0x0"
+      },
+      {
+        "index": 59,
+        "name": "sti",
+        "first_lba": 1122328,
+        "last_lba": 1126423,
+        "grow": false,
+        "sectors": 4096,
+        "bytes": 2097152,
+        "attributes": "0x0"
+      },
+      {
+        "index": 60,
+        "name": "LOGO",
+        "first_lba": 1126424,
+        "last_lba": 1159191,
+        "grow": false,
+        "sectors": 32768,
+        "bytes": 16777216,
+        "attributes": "0x0"
+      },
+      {
+        "index": 61,
+        "name": "DRIVER",
+        "first_lba": 1159192,
+        "last_lba": 1224727,
+        "grow": false,
+        "sectors": 65536,
+        "bytes": 33554432,
+        "attributes": "0x0"
+      },
+      {
+        "index": 62,
+        "name": "vbmeta",
+        "first_lba": 1228800,
+        "last_lba": 1228927,
+        "grow": false,
+        "sectors": 128,
+        "bytes": 65536,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 63,
+        "name": "vbmetabak",
+        "first_lba": 1228928,
+        "last_lba": 1229055,
+        "grow": false,
+        "sectors": 128,
+        "bytes": 65536,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 64,
+        "name": "modem",
+        "first_lba": 1229056,
+        "last_lba": 1491199,
+        "grow": false,
+        "sectors": 262144,
+        "bytes": 134217728,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 65,
+        "name": "cache",
+        "first_lba": 1507328,
+        "last_lba": 2031615,
+        "grow": false,
+        "sectors": 524288,
+        "bytes": 268435456,
+        "attributes": "0x0"
+      },
+      {
+        "index": 66,
+        "name": "system",
+        "first_lba": 2031616,
+        "last_lba": 8830975,
+        "grow": false,
+        "sectors": 6799360,
+        "bytes": 3481272320,
+        "attributes": "0x0"
+      },
+      {
+        "index": 67,
+        "name": "vendor",
+        "first_lba": 8830976,
+        "last_lba": 10928127,
+        "grow": false,
+        "sectors": 2097152,
+        "bytes": 1073741824,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 68,
+        "name": "storsec",
+        "first_lba": 10928128,
+        "last_lba": 10928383,
+        "grow": false,
+        "sectors": 256,
+        "bytes": 131072,
+        "attributes": "0x1000000000000000"
+      },
+      {
+        "index": 69,
+        "name": "userdata",
+        "first_lba": 10944512,
+        "last_lba": null,
+        "grow": true,
+        "sectors": 0,
+        "bytes": 0,
+        "attributes": "0x0"
+      }
+    ]
+  },
+  "gpt_main2.bin": {
+    "path": "/Users/mry0000/Desktop/unixnu_r11/ofp_extracted/gpt_main2.bin",
+    "entry_count": 4,
+    "partitions": [
+      {
+        "index": 1,
+        "name": "CDT",
+        "first_lba": 34,
+        "last_lba": 37,
+        "grow": false,
+        "sectors": 4,
+        "bytes": 2048,
+        "attributes": "0x0"
+      },
+      {
+        "index": 2,
+        "name": "last_grow",
+        "first_lba": 38,
+        "last_lba": null,
+        "grow": true,
+        "sectors": 0,
+        "bytes": 0,
+        "attributes": "0x0"
+      }
+    ]
+  }
+}

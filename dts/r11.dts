@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: BSD-3-Clause
+//
+// OPPO R11 (r11 / CPH1707 / model 16051), Qualcomm SDM660 + PM660/PM660L.
+//
+// Hardware values come from inputs/hw.json, extracted from the stock OTA boot
+// image (scripts/extract-inputs.py): device-tree identity, peripheral addresses,
+// panel identity, touch node, reserved memory and GPT geometry.
+
+/dts-v1/;
+
+/include/ "sdm660.dtsi"
+
+/ {
+    model = "OPPO R11 (CPH1707)";
+    compatible = "oppo,r11", "qcom,sdm660", "qcom,sdm660-mtp";
+
+    // 4 GiB unit: one contiguous handoff window, as the ADT generator requires.
+    // The stock tree leaves /memory zeroed (ABL fills it from SMEM at boot), so
+    // this value was measured on a 4 GiB R11: bank0 0x80000000+2 GiB and bank1
+    // 0x100000000+0x7E4C0000 are adjacent. Confirm it on the target device; it
+    // must equal [payload] dram_size in board.toml.
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x0 0x80000000 0x0 0xfe4c0000>;
+    };
+
+    reserved-memory {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+
+        // Stock ABL turns the panel off when this node is missing.
+        splash_region: framebuffer@9d400000 {
+            label = "cont_splash_region";
+            reg = <0x0 0x9d400000 0x0 0x2400000>;
+            no-map;
+        };
+
+        // Modem / ADSP / CDSP firmware reservations. They stay reserved so XNU
+        // never allocates over a region the DSPs may still own.
+        removed_regions@85800000 {
+            reg = <0x0 0x85800000 0x0 0x3700000>;
+            no-map;
+        };
+        modem_region@8ac00000 {
+            reg = <0x0 0x8ac00000 0x0 0x7e00000>;
+            no-map;
+        };
+        adsp_region@92a00000 {
+            reg = <0x0 0x92a00000 0x0 0x2000000>;
+            no-map;
+        };
+        cdsp_region@94c00000 {
+            reg = <0x0 0x94c00000 0x0 0x600000>;
+            no-map;
+        };
+    };
+
+    chosen {
+        // No exposed UART on the R11: logs are shown through the framebuffer.
+        unixnu,console = "framebuffer";
+    };
+};
+
+// Scheduler clusters: 0-3 are the A53-class silver cores, 4-7 the A73-class gold cores.
+&cpu0 { unixnu,cluster-type = "E"; };
+&cpu1 { unixnu,cluster-type = "E"; };
+&cpu2 { unixnu,cluster-type = "E"; };
+&cpu3 { unixnu,cluster-type = "E"; };
+&cpu4 { unixnu,cluster-type = "P"; };
+&cpu5 { unixnu,cluster-type = "P"; };
+&cpu6 { unixnu,cluster-type = "P"; };
+&cpu7 { unixnu,cluster-type = "P"; };
+
+// Primary eMMC is the boot device and carries the GPT below.
+&emmc {
+    status = "okay";
+    non-removable;
+    bus-width = <8>;
+};
+
+// BLSP1 I2C1: Synaptics S3508 touch panel controller at 0x20.
+&i2c1 {
+    status = "okay";
+
+    touchscreen@20 {
+        compatible = "synaptics,s3508";
+        reg = <0x20>;
+        interrupt-parent = <&tlmm>;
+        interrupts = <67 0x2>;
+        unixnu,adt-name = "touchscreen";
+    };
+};
+
+// MDSS / DSI: Samsung S6E3FA3 AMOLED, 1080x1920, command mode, single DSI link.
+&mdss {
+    status = "okay";
+
+    dsi0: dsi@c994400 {
+        compatible = "qcom,mdss-dsi-ctrl";
+        reg = <0x0 0xc994400 0x400>;
+        #address-cells = <1>;
+        #size-cells = <0>;
+        unixnu,adt-name = "dsi0";
+
+        panel@0 {
+            compatible = "oppo,oppo16051samsung-s6e3fa3";
+            reg = <0>;
+            qcom,mdss-dsi-panel-name = "oppo16051samsung s6e3fa3 1080p cmd mode dsi panel";
+            qcom,mdss-dsi-panel-type = "dsi_cmd_mode";
+            qcom,mdss-dsi-panel-width = <1080>;
+            qcom,mdss-dsi-panel-height = <1920>;
+            qcom,mdss-dsi-panel-framerate = <60>;
+            // Init sequence, timings and PHY settings are replayed from the
+            // stock device tree: see inputs/r11-stock.dts, node
+            // /soc/qcom,mdss_mdp@c900000/qcom,mdss_dsi_oppo16051samsung_s6e3fa3_1080p_cmd
+            unixnu,adt-name = "panel";
+            status = "okay";
+        };
+    };
+};

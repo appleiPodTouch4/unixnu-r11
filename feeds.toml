@@ -1,0 +1,10 @@
+# Sources of the r11 device repository.
+#
+# The SDM660 shared layer is vendored under soc/ instead of a sibling checkout:
+# the macOS build workflow clones only this repository, so an absolute or ../ path
+# would not resolve there. When UniXNU-sdm660-common is published, replace this
+# entry with kind/name/git/commit and drop soc/.
+[[source]]
+kind = "soc"
+name = "sdm660"
+local = "soc"
