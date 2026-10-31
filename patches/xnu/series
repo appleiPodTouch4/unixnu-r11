@@ -17,3 +17,11 @@ zzzz-host-clang-static-assert.patch
 # Same class, same reason: libkern/os/log.c asserts that two macro aliases have
 # the same address, which Xcode 14's clang will not fold into a constant.
 zzzz-host-clang-xnupost-assert.patch
+# Third host-toolchain gap, this one in iig rather than clang: the iig shipped
+# with older Xcodes emits an unguarded IORPCMessageFromMach() call into every
+# generated *.iig.cpp _Dispatch(), while iokit/DriverKit/IORPC.h (restored by
+# prepare-xnu-source.py from Apple's public source) declares it only for user
+# space. Adds the kernel-side prototype and points the reply helper at it.
+# Not reachable from the DriverKit headers themselves: they are untracked in
+# .cache/xnu-work, so a device patch cannot touch them.
+zzzz-host-iig-iorpc-export.patch

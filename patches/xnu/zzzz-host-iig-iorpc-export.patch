@@ -1,0 +1,107 @@
+diff --git a/iokit/Kernel/IOUserServer.cpp b/iokit/Kernel/IOUserServer.cpp
+index b14ca9c..c59bec1 100644
+--- a/iokit/Kernel/IOUserServer.cpp
++++ b/iokit/Kernel/IOUserServer.cpp
+@@ -3589,15 +3589,24 @@ IOUserServer::rpc(IORPC rpc)
+ 
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
+-static IORPCMessage *
+-IORPCMessageFromMachReply(IORPCMessageMach * msg)
++/*
++ * Kernel half of the IORPC accessor that the iig-generated Dispatch() methods
++ * call. iokit/DriverKit/IORPC.h declares IORPCMessageFromMach() only outside
++ * the kernel: those headers are not part of this tree (prepare-xnu-source.py
++ * restores them from Apple's public source) and there the prototype sits under
++ * #ifndef KERNEL. The iig that ships with the host Xcode nevertheless emits an
++ * unguarded call from every *.iig.cpp _Dispatch(). The body below is the reply
++ * side, which already read the same flag as a local; the wrapper keeps the
++ * in-kernel callers unchanged.
++ */
++extern "C" IORPCMessage *
++IORPCMessageFromMach(IORPCMessageMach * msg, bool reply)
+ {
+ 	mach_msg_size_t              idx, count;
+ 	mach_msg_port_descriptor_t * desc;
+ 	mach_msg_port_descriptor_t * maxDesc;
+ 	size_t                       size, msgsize;
+ 	bool                         upgrade;
+-	bool                         reply = true;
+ 
+ 	msgsize = msg->msgh.msgh_size;
+ 	count   = msg->msgh_body.msgh_descriptor_count;
+@@ -3629,6 +3638,12 @@ IORPCMessageFromMachReply(IORPCMessageMach * msg)
+ 	return (IORPCMessage *)(uintptr_t) desc;
+ }
+ 
++static IORPCMessage *
++IORPCMessageFromMachReply(IORPCMessageMach * msg)
++{
++	return IORPCMessageFromMach(msg, true);
++}
++
+ ipc_port_t
+ IOUserServer::copySendRightForObject(OSObject * object, ipc_kobject_type_t type)
+ {
+diff --git a/iokit/Kernel/iorpc_kernel_export.h b/iokit/Kernel/iorpc_kernel_export.h
+new file mode 100644
+index 0000000..4e09ef3
+--- /dev/null
++++ b/iokit/Kernel/iorpc_kernel_export.h
+@@ -0,0 +1,30 @@
++/*
++ * Kernel-side prototype for IORPCMessageFromMach().
++ *
++ * See the definition in IOUserServer.cpp for the whole story: the DriverKit
++ * headers this tree compiles against are not in the tree (prepare-xnu-source.py
++ * restores them from Apple's public source, where the prototype is guarded by
++ * "#ifndef KERNEL"), while the iig that ships with the host Xcode emits an
++ * unguarded call to it from the _Dispatch() method of every generated
++ * *.iig.cpp.
++ *
++ * iokit/Makefile force-includes this file through XNU's OTHER_CXXFLAGS hook,
++ * so it only reaches the C++ objects of this directory (the DriverKit
++ * *.iig.cpp files among them). Both structs are forward declared because this
++ * header is processed before the translation unit's own includes.
++ */
++
++#ifndef _IOKIT_KERNEL_IORPC_KERNEL_EXPORT_H
++#define _IOKIT_KERNEL_IORPC_KERNEL_EXPORT_H
++
++#if defined(KERNEL) && defined(__cplusplus)
++
++struct IORPCMessageMach;
++struct IORPCMessage;
++
++extern "C" IORPCMessage *
++IORPCMessageFromMach(IORPCMessageMach * msg, bool reply);
++
++#endif /* KERNEL && __cplusplus */
++
++#endif /* !_IOKIT_KERNEL_IORPC_KERNEL_EXPORT_H */
+diff --git a/iokit/Makefile b/iokit/Makefile
+index 78f8686..652da9c 100644
+--- a/iokit/Makefile
++++ b/iokit/Makefile
+@@ -14,3 +14,21 @@ COMP_SUBDIRS = conf
+ 
+ include $(MakeInc_rule)
+ include $(MakeInc_dir)
++
++#
++# The generated DriverKit/*.iig.cpp files call IORPCMessageFromMach() from their
++# _Dispatch() methods, but iokit/DriverKit/IORPC.h declares it only outside the
++# kernel (those headers are restored from Apple's public source by
++# scripts/prepare-xnu-source.py, so they cannot carry a board patch). Force the
++# kernel-side prototype in, and keep the definition in
++# iokit/Kernel/IOUserServer.cpp; iokit/Kernel/iorpc_kernel_export.h explains both
++# halves.
++#
++# This has to sit at the end of this Makefile rather than in
++# iokit/DriverKit/Makefile: every directory Makefile re-runs "include
++# $(MakeInc_def)", which assigns OTHER_CXXFLAGS with "=" and would drop an
++# earlier "+=". Only the assignment after the last subdirectory has been read
++# survives into CXXFLAGS_GEN.
++#
++OTHER_CXXFLAGS += -include $(SRCROOT)/iokit/Kernel/iorpc_kernel_export.h
++
