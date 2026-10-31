@@ -62,23 +62,45 @@ two files that *are* tracked:
 | File | Change |
 | --- | --- |
 | `iokit/Kernel/IOUserServer.cpp` | the reply body becomes `extern "C" IORPCMessage *IORPCMessageFromMach(IORPCMessageMach *, bool reply)`; `IORPCMessageFromMachReply()` stays as a one-line `static` wrapper passing `true`, so every in-kernel caller is untouched |
-| `iokit/Kernel/iorpc_kernel_export.h` | new file: the prototype, forward declaring both structs because it is processed before the translation unit's own includes |
-| `iokit/Makefile` | `OTHER_CXXFLAGS += -include $(SRCROOT)/iokit/Kernel/iorpc_kernel_export.h`, appended **after** `include $(MakeInc_dir)` |
+| `iokit/DriverKit/Makefile` | in the `%.h : %.iig` rule, after `iig` runs, an `awk` step injects the prototype into the generated `.iig.cpp` |
 
-`OTHER_CXXFLAGS` is XNU's own extension point — `makedefs/MakeInc.def:594`
-feeds it into `CXXFLAGS_GEN`, which is what `P_RULE_1A` compiles `.iig.cpp` with.
+The iig output already splits on the kernel: its header block is
+`#if KERNEL / #include <libkern/c++/OSString.h> / #else / #include
+<DriverKit/DriverKit.h> / #endif`. It just does not move the `_Dispatch()` call
+into the same guard. Under `KERNEL` the `IORPC` types are all present — the
+compiler complains only about the missing function — so one prototype is the
+whole fix.
 
-Two placement details are not optional:
+The injection anchors on iig's own `/* @iig end */` marker, which lands after
+every `#include` in the file:
 
-* **It belongs in `iokit/Makefile`, not `iokit/DriverKit/Makefile`.** Every
-  directory Makefile re-runs `include $(MakeInc_def)`, and that file *assigns*
-  `OTHER_CXXFLAGS` with `=` rather than `+=`. The parent `iokit/Makefile` reads
-  its siblings (`IOKit`, `DriverKit`, `Exclaves`) while expanding
-  `EXPINC_SUBDIRS`, so an append made inside `iokit/DriverKit/Makefile` is wiped
-  before the C++ rules ever run. Verify with
-  `cd iokit && SRCROOT=… make -f Makefile -p -n | grep '^OTHER_CXXFLAGS'`:
-  empty means the append was lost, non-empty means it survives.
-* **It has to come after the last include.** Hence the end of the file.
+```make
+	$(_v)awk '/^\/\* @iig end \*\/$$/ && !iorpc { print; print "extern \"C\" IORPCMessage *IORPCMessageFromMach(IORPCMessageMach *, bool);"; iorpc = 1; next } { print }' $(patsubst %.h,%.iig.cpp,$@) > $(patsubst %.h,%.iig.cpp,$@).iorpc && mv $(patsubst %.h,%.iig.cpp,$@).iorpc $(patsubst %.h,%.iig.cpp,$@)
+```
+
+Rewriting the generated file was chosen after two dead ends. Adding `-include`
+through `OTHER_CXXFLAGS` and then through `CXXFLAGS` both looked right —
+`make -p` in `iokit/DriverKit` shows the flag on both variables — yet two full
+rebuilds compiled without it, so something between the Makefile and the compile
+line drops it. Where exactly was not isolated and does not need to be: the
+injection depends on no variable at all. It only runs when the `.iig.cpp` is
+regenerated, so delete `build/xnu/ios-obj/*/iokit/DriverKit/*.iig.cpp` after
+touching this part of the patch.
+
+Verify without running a build — XNU's `_v` is empty, so neither the log nor
+`make -n` prints the real command line:
+
+```sh
+W=<tree>/.cache/xnu-work; O=<tree>/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837
+cd "$O/iokit/DriverKit" && clang++ -fsyntax-only -std=gnu++2b -fapple-kext \
+  -DKERNEL -DKERNEL_PRIVATE -DAPPLE -DPRIVATE \
+  -I"$O/iokit" -I"$O" -I"$W/iokit" -I"$W/osfmk" -I"$W/bsd" -I"$W/libkern" -I"$O/bsd" \
+  -I"$W/EXTERNAL_HEADERS" --target=arm64-apple-ios17.0 \
+  -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" OSObject.iig.cpp
+```
+
+No output means it passes. `-I"$O/iokit" -I"$O"` are required because the
+generated headers live in the object directory.
 
 The `reply` argument only selects which version constant the message id is
 checked against, so splitting the function is behaviour-preserving: the kernel

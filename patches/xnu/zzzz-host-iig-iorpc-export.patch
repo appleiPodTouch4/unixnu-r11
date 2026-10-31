@@ -1,3 +1,38 @@
+diff --git a/iokit/DriverKit/Makefile b/iokit/DriverKit/Makefile
+index d456318..2b7d5ba 100644
+--- a/iokit/DriverKit/Makefile
++++ b/iokit/DriverKit/Makefile
+@@ -60,6 +60,7 @@ $(GENERATED_HEADERS) : \
+ 	%.h : %.iig
+ 	@$(LOG_IIG) "$@"
+ 	$(_v)$(IIG) --def $< --header $@ --impl $(patsubst %.h,%.iig.cpp,$@) --framework-name DriverKit ${OTHER_IIG_FLAGS} -- ${OTHER_IIG_CFLAGS} $(_vstdout)
++	$(_v)awk '{ L[NR] = $$0; if ($$0 ~ /^#include/) n = NR } END { for (i = 1; i <= NR; i++) { print L[i]; if (i == n) print "extern \"C\" IORPCMessage *IORPCMessageFromMach(IORPCMessageMach *, bool);" } }' $(patsubst %.h,%.iig.cpp,$@) > $(patsubst %.h,%.iig.cpp,$@).iorpc && mv $(patsubst %.h,%.iig.cpp,$@).iorpc $(patsubst %.h,%.iig.cpp,$@)
+ 
+ $(GENERATED_IMPL) : $(GENERATED_HEADERS)
+ 
+@@ -68,3 +69,22 @@ endif
+ 
+ include $(MakeInc_rule)
+ include $(MakeInc_dir)
++
++#
++# The generated *.iig.cpp files call IORPCMessageFromMach() from their
++# _Dispatch() methods. The iig that ships with this host emits that call for
++# the #if KERNEL branch too, while iokit/DriverKit/IORPC.h declares the
++# function only outside the kernel; the kernel keeps IORPCMessageFromMachReply()
++# in iokit/Kernel/IOUserServer.cpp, which the board patch renames and exports.
++#
++# The declaration is injected into the generated source by the awk step in the
++# %.h : %.iig rule above, right after iig's own "/* @iig end */" marker, i.e.
++# after every #include of the file. Three earlier attempts to add it with
++# "-include" through OTHER_CXXFLAGS or CXXFLAGS all compiled without the flag,
++# so the make-variable route is a dead end here; rewriting the generated file
++# depends on nothing but the rule itself.
++#
++# If this file is edited again, remember that the injection only runs when the
++# .iig.cpp is regenerated: delete build/xnu/ios-obj/*/iokit/DriverKit/*.iig.cpp
++# to force it.
++#
 diff --git a/iokit/Kernel/IOUserServer.cpp b/iokit/Kernel/IOUserServer.cpp
 index b14ca9c..c59bec1 100644
 --- a/iokit/Kernel/IOUserServer.cpp
@@ -43,65 +78,3 @@ index b14ca9c..c59bec1 100644
  ipc_port_t
  IOUserServer::copySendRightForObject(OSObject * object, ipc_kobject_type_t type)
  {
-diff --git a/iokit/Kernel/iorpc_kernel_export.h b/iokit/Kernel/iorpc_kernel_export.h
-new file mode 100644
-index 0000000..4e09ef3
---- /dev/null
-+++ b/iokit/Kernel/iorpc_kernel_export.h
-@@ -0,0 +1,30 @@
-+/*
-+ * Kernel-side prototype for IORPCMessageFromMach().
-+ *
-+ * See the definition in IOUserServer.cpp for the whole story: the DriverKit
-+ * headers this tree compiles against are not in the tree (prepare-xnu-source.py
-+ * restores them from Apple's public source, where the prototype is guarded by
-+ * "#ifndef KERNEL"), while the iig that ships with the host Xcode emits an
-+ * unguarded call to it from the _Dispatch() method of every generated
-+ * *.iig.cpp.
-+ *
-+ * iokit/Makefile force-includes this file through XNU's OTHER_CXXFLAGS hook,
-+ * so it only reaches the C++ objects of this directory (the DriverKit
-+ * *.iig.cpp files among them). Both structs are forward declared because this
-+ * header is processed before the translation unit's own includes.
-+ */
-+
-+#ifndef _IOKIT_KERNEL_IORPC_KERNEL_EXPORT_H
-+#define _IOKIT_KERNEL_IORPC_KERNEL_EXPORT_H
-+
-+#if defined(KERNEL) && defined(__cplusplus)
-+
-+struct IORPCMessageMach;
-+struct IORPCMessage;
-+
-+extern "C" IORPCMessage *
-+IORPCMessageFromMach(IORPCMessageMach * msg, bool reply);
-+
-+#endif /* KERNEL && __cplusplus */
-+
-+#endif /* !_IOKIT_KERNEL_IORPC_KERNEL_EXPORT_H */
-diff --git a/iokit/Makefile b/iokit/Makefile
-index 78f8686..652da9c 100644
---- a/iokit/Makefile
-+++ b/iokit/Makefile
-@@ -14,3 +14,21 @@ COMP_SUBDIRS = conf
- 
- include $(MakeInc_rule)
- include $(MakeInc_dir)
-+
-+#
-+# The generated DriverKit/*.iig.cpp files call IORPCMessageFromMach() from their
-+# _Dispatch() methods, but iokit/DriverKit/IORPC.h declares it only outside the
-+# kernel (those headers are restored from Apple's public source by
-+# scripts/prepare-xnu-source.py, so they cannot carry a board patch). Force the
-+# kernel-side prototype in, and keep the definition in
-+# iokit/Kernel/IOUserServer.cpp; iokit/Kernel/iorpc_kernel_export.h explains both
-+# halves.
-+#
-+# This has to sit at the end of this Makefile rather than in
-+# iokit/DriverKit/Makefile: every directory Makefile re-runs "include
-+# $(MakeInc_def)", which assigns OTHER_CXXFLAGS with "=" and would drop an
-+# earlier "+=". Only the assignment after the last subdirectory has been read
-+# survives into CXXFLAGS_GEN.
-+#
-+OTHER_CXXFLAGS += -include $(SRCROOT)/iokit/Kernel/iorpc_kernel_export.h
-+
