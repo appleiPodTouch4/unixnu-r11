@@ -67,7 +67,39 @@ git submodule update --init --recursive          # components, kits, DarwinBoot
 fastboot boot out/r11/ipados-17.7.11-21H461/r11/boot/boot.img
 ```
 
-`../build-r11.sh` runs the same sequence.
+`../build-r11.sh` runs the same sequence: `inputs`, `base`, `config`, `kernel`,
+`payload`, `firmware`, `bootimg`, or `all` for the host-runnable part.
+
+### Host split: what this machine can and cannot build
+
+| Step | Host requirement | macOS 12 / Xcode 14.2 |
+| --- | --- | --- |
+| `defconfig`, `fetch`, `tree` | Python 3.11+ | ok |
+| `build firmware` | `lld-link` (llvm@15 here) | ok, FD is exactly `0x300000` |
+| `bootimg` | `llvm-objcopy`, `llvm-nm` | ok |
+| `build kernel` | Apple clang with `-mach_msg2` (Xcode 15+) | **blocked** |
+
+The kernel step is blocked because `xnu-10063` compiles mig output with
+`-mach_msg2`, which Apple clang 14 and LLVM 15 both reject; macOS 12 caps Xcode
+at 14.3. See `docs/host-toolchain.md` for the evidence and the workaround.
+
+### Building the kernel on a GitHub macOS runner
+
+The project's `macOS build` workflow (`.github/workflows/macos.yml` in the
+UniXNU checkout) runs the kernel step on `macos-26` with Xcode 26.6:
+
+```sh
+git remote add origin git@github.com:<owner>/UniXNU-r11.git
+git push -u origin main
+# then, in the UniXNU fork's Actions tab: "macOS build"
+#   device_repository = <owner>/UniXNU-r11
+#   device_ref        = main
+#   defconfig         = r11_defconfig
+#   steps             = kernel
+```
+
+Add the `UNIXNU_UNIQUE_CHIP_ID` secret before using `steps=kernel payload`: this
+board sets `[payload.adt] unique_chip_id = "required"`.
 
 ## State
 
@@ -79,15 +111,16 @@ kernel-side storage, display, input and power drivers are not written; see
 | --- | --- |
 | Hardware inputs from the OFP package | done (`inputs/`) |
 | Format 2 board configuration, DTS, defconfig | done; `defconfig` resolves all four layers |
-| UEFI platform package, FD layout, BootShim | source complete; host build not run yet |
+| UEFI platform package, FD layout, BootShim | builds here; boots on hardware (`fastboot boot`) |
 | Vendor SDM660 DXE set | reused from a sibling UEFI device, profiles not R11-specific |
 | Display | simple framebuffer over the stock splash buffer; no MDSS/DSI driver |
 | Storage / input / power | no XNU driver (UEFI side works through vendor drivers) |
-| Kernel, payload, boot image | commands defined, no device result yet |
+| Kernel | patches and archives build; compile needs Xcode 15+ |
+| Payload / boot image | `boot.img` builds (empty ramdisk); payload needs the kernel |
 
 ## Related
 
 * `porting.toml` — the porting record: inputs, findings, limits, next actions.
 * [`../uefi-r11`](../uefi-r11) — the Mu-Silicium platform package for this board.
-* [`../UniXNU-sdm660-common`](../UniXNU-sdm660-common) — SDM660 shared DTSI and config.
+* `soc/` — the SDM660 layer vendored in this repository so a clone builds without siblings\n  (`../UniXNU-sdm660-common` is the same content, kept for a future published repository).
 * UniXNU documentation: [porting](https://unixnu.com/porting/), [UEFI firmware](https://unixnu.com/porting/uefi-firmware), [device repository](https://unixnu.com/porting/device-repository).
