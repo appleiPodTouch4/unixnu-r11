@@ -30,7 +30,11 @@ partition geometry for the OPPO R11 (CPH1707 / model 16051, SDM660).
 4. **No `[[bootimg.dtb_node]]`.** The stock R11 tree already carries
    `/reserved-memory/splash_region`; adding it again makes `fdtput` fail.
 5. **`fastboot boot`, not `fastboot flash boot`.** `boot` is 64 MiB, the payload
-   is 192 MiB.
+   is 56 MiB. ABL will not place a ramdisk large enough to hold the prelinked
+   kernel: 8 MiB and 32 MiB payloads reach the UniXNU menu, a 64 MiB one
+   produces no output, and the memory map is not the limit. `[payload]
+   size_mib` stays at 56 and `../build-r11.sh bootimg` LZMA-packs the volume to
+   about 7 MiB, which `UniXNURamDiskDxe` expands back during DXE.
 6. **Only MMIO nodes carry `unixnu,adt-name`.** The generator makes every tagged
    node a *direct* child of `/arm-io` and rewrites its `reg` as
    `physical address - arm-io base`, so a cpu node (reg = MPIDR affinity 0x0) or a

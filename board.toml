@@ -92,14 +92,14 @@ tools = true
 # The image is booted with "fastboot boot": boot is only 64 MiB
 # (GPT: 245760-376831), so a flashed image has to stay under that.
 #
-# The size is also bounded by where ABL puts the ramdisk. The boot header
-# carries ramdisk_addr 0x01000000, and ABL adds its DRAM base 0x80000000, so the
-# payload lands at 0x81000000 and runs for size_mib bytes. The firmware memory
-# map reserves 0x80000000+0x05800000 for kernel and ramdisk and keeps SMEM at
-# 0x86000000, so anything above 80 MiB runs into the SMEM carve-out. 64 MiB ends
-# at 0x85000000, inside the window. kernel.macho is 51.3 MiB, which leaves
-# ~12 MiB for the ADT and the boot menu.
-size_mib = 64
+# The size is also bounded by what ABL accepts. Measurement on the reference
+# unit: an 8 MiB and a 32 MiB payload both boot to the UniXNU menu, a 64 MiB
+# payload produces no output at all. The reserved-memory node of the stock tree
+# starts at 0x85800000, so 0x81000000+0x05800000 is free by design and the limit
+# is enforced by ABL rather than by the memory map. Keep this as small as the
+# kernel allows: kernel.macho is 51.3 MiB, so 56 MiB is the first size that fits
+# it with room for the ADT and the boot menu.
+size_mib = 56
 loader = "firmware"
 title = "Boot"
 dram_size = "0xFE4C0000"      # must equal the /memory reg in dts/r11.dts
