@@ -26,6 +26,15 @@
     cpus {
         #address-cells = <1>;
         #size-cells = <0>;
+        // XNU's ADT translation requires an explicit ranges property on any node
+        // that declares #address-cells. Empty means the identity mapping, which
+        // is what the cpu@N reg values (plain affinity numbers) already assume.
+        ranges;
+        // No unixnu,adt-name on the cpu@N children: the generator turns every
+        // exported node into a child of /arm-io and rewrites its reg as a
+        // physical address minus the arm-io base, so an exported cpu would put an
+        // MPIDR affinity (0x0, 0x100, ...) below the 16 MiB base and /arm-io would
+        // be rejected. The ADT cpus node is built from these same children.
         // 19.2 MHz XO is the ARM generic timer rate on SDM660.
         timebase-frequency = <19200000>;
 
@@ -35,28 +44,24 @@
             compatible = "arm,armv8";
             reg = <0x0>;
             enable-method = "psci";
-            unixnu,adt-name = "cpu0";
         };
         cpu1: cpu@1 {
             device_type = "cpu";
             compatible = "arm,armv8";
             reg = <0x1>;
             enable-method = "psci";
-            unixnu,adt-name = "cpu1";
         };
         cpu2: cpu@2 {
             device_type = "cpu";
             compatible = "arm,armv8";
             reg = <0x2>;
             enable-method = "psci";
-            unixnu,adt-name = "cpu2";
         };
         cpu3: cpu@3 {
             device_type = "cpu";
             compatible = "arm,armv8";
             reg = <0x3>;
             enable-method = "psci";
-            unixnu,adt-name = "cpu3";
         };
         // Cluster 1: Kryo 260 gold (Cortex-A73 class), MPIDR 0x100-0x103.
         cpu4: cpu@100 {
@@ -64,28 +69,24 @@
             compatible = "arm,armv8";
             reg = <0x100>;
             enable-method = "psci";
-            unixnu,adt-name = "cpu4";
         };
         cpu5: cpu@101 {
             device_type = "cpu";
             compatible = "arm,armv8";
             reg = <0x101>;
             enable-method = "psci";
-            unixnu,adt-name = "cpu5";
         };
         cpu6: cpu@102 {
             device_type = "cpu";
             compatible = "arm,armv8";
             reg = <0x102>;
             enable-method = "psci";
-            unixnu,adt-name = "cpu6";
         };
         cpu7: cpu@103 {
             device_type = "cpu";
             compatible = "arm,armv8";
             reg = <0x103>;
             enable-method = "psci";
-            unixnu,adt-name = "cpu7";
         };
     };
 
@@ -95,6 +96,7 @@
         #interrupt-cells = <3>;
         interrupt-controller;
         #address-cells = <0>;
+        ranges;
         reg = <0x0 0x17a00000 0x0 0x10000>,
               <0x0 0x17b00000 0x0 0x100000>;
         unixnu,adt-name = "interrupt-controller";
@@ -110,21 +112,32 @@
         unixnu,adt-name = "timer";
     };
 
-    // Two translated windows cover every SoC peripheral without mapping DRAM:
+    // Translated windows for the SoC peripherals. DRAM itself stays unmapped;
+    // the last two entries exist only because SMEM and IMEM sit inside DRAM and
+    // still need a translation of their own.
     //   0x00000000-0x0ff00000  GCC, TLMM, SPMI, USB, SDCC, MDSS, SMMU, GPU clocks
-    //   0x17000000-0x19000000  GIC, QTIMER, SMEM, WCNSS
+    //   0x17000000-0x19000000  GIC, QTIMER, WCNSS
+    //   0x86000000-0x86200000  SMEM (inside DRAM)
+    //   0x146b0000-0x146d0000  IMEM (inside DRAM)
     arm-io {
         #address-cells = <2>;
         #size-cells = <2>;
         ranges = <0x0 0x00000000 0x0 0x00000000 0x0 0x0ff00000>,
-                 <0x0 0x17000000 0x0 0x17000000 0x0 0x02000000>;
+                 <0x0 0x17000000 0x0 0x17000000 0x0 0x02000000>,
+                 <0x0 0x86000000 0x0 0x86000000 0x0 0x00200000>,
+                 <0x0 0x146b0000 0x0 0x146b0000 0x0 0x00020000>;
 
         gcc: clock-controller@100000 {
             compatible = "qcom,gcc-sdm660", "syscon";
             reg = <0x0 0x100000 0x0 0x94000>;
             #clock-cells = <1>;
             #reset-cells = <1>;
-            unixnu,adt-name = "gcc";
+            // Not exported to the ADT: arm_io_window() takes the lowest exported
+            // register and aligns it down to 16 MiB, and GCC sits at 1 MiB, which
+            // would make the arm-io base zero -- the builder refuses that. ABL has
+            // already programmed the clocks this early boot needs, so leaving GCC
+            // out of the ADT costs DVFS, not bring-up. Revisit once a clock driver
+            // exists that can place GCC relative to a non-zero base.
         };
 
         tlmm: pinctrl@3000000 {
@@ -142,6 +155,7 @@
             reg = <0x0 0x800f000 0x0 0x1100>,
                   <0x0 0x8400000 0x0 0x100000>;
             #address-cells = <2>;
+            ranges;
             #size-cells = <0>;
             unixnu,adt-name = "spmi";
         };
@@ -177,6 +191,7 @@
             compatible = "qcom,i2c-msm-v2";
             reg = <0x0 0xc175000 0x0 0x600>;
             #address-cells = <1>;
+            ranges;
             #size-cells = <0>;
             clock-frequency = <400000>;
             status = "disabled";
@@ -187,6 +202,7 @@
             compatible = "qcom,i2c-msm-v2";
             reg = <0x0 0xc176000 0x0 0x600>;
             #address-cells = <1>;
+            ranges;
             #size-cells = <0>;
             status = "disabled";
             unixnu,adt-name = "i2c2";
@@ -196,6 +212,7 @@
             compatible = "qcom,i2c-msm-v2";
             reg = <0x0 0xc1b6000 0x0 0x600>;
             #address-cells = <1>;
+            ranges;
             #size-cells = <0>;
             status = "disabled";
             unixnu,adt-name = "i2c6";
@@ -209,6 +226,7 @@
             reg-names = "mdp", "dsi_pll";
             interrupts = <0 83 4>;
             #address-cells = <2>;
+            ranges;
             #size-cells = <1>;
             status = "disabled";
             unixnu,adt-name = "mdss";

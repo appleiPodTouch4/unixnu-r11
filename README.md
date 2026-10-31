@@ -77,7 +77,7 @@ fastboot boot out/r11/ipados-17.7.11-21H461/r11/boot/boot.img
 | `defconfig`, `fetch`, `tree` | Python 3.11+ | ok |
 | `build firmware` | `lld-link` (llvm@15 here) | ok, FD is exactly `0x300000` |
 | `bootimg` | `llvm-objcopy`, `llvm-nm` | ok |
-| `build kernel` | Apple clang, plus `scripts/xnu-clang` | every file but one compiles; `iokit/DriverKit/OSObject.iig.cpp` fails |
+| `build kernel` | Apple clang, plus `scripts/xnu-clang` | builds and prelinks: 15.5 MB `mach.development.bcm2837`, 53.8 MB `kernel.macho` |
 
 `xnu-10063` expects Xcode 15's compiler, but the three arguments it chokes on
 here are all rewritable. `scripts/xnu-clang` (and its `xnu-clang++` symlink) drop
@@ -128,8 +128,8 @@ kernel-side storage, display, input and power drivers are not written; see
 | Vendor SDM660 DXE set | reused from a sibling UEFI device, profiles not R11-specific |
 | Display | simple framebuffer over the stock splash buffer; no MDSS/DSI driver |
 | Storage / input / power | no XNU driver (UEFI side works through vendor drivers) |
-| Kernel | ~700 sources compile here; one DriverKit file needs the `IORPC` port or Xcode 15+ |
-| Payload / boot image | `boot.img` builds (empty ramdisk); payload needs the kernel |
+| Kernel | builds and prelinks on this host; `build/xnu/.../mach.development.bcm2837` 15.5 MB, `kernel/kernel.macho` 53.8 MB |
+| Payload / boot image | payload 192 MiB holding `kernel.macho` and its ADT; `boot.img` 202,670,080 bytes carries it as the ramdisk (`fastboot boot` only) |
 
 ## Related
 

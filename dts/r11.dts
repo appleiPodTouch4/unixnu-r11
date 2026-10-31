@@ -88,7 +88,11 @@
         reg = <0x20>;
         interrupt-parent = <&tlmm>;
         interrupts = <67 0x2>;
-        unixnu,adt-name = "touchscreen";
+        // Not exported yet: unixnu,adt-name puts a node directly under /arm-io and
+        // rewrites reg as physical address minus the arm-io base, so a nested bus
+        // device would contribute its I2C slave address (0x20) as if it were MMIO
+        // and drag the arm-io base down to zero. Input is a planned area; expose
+        // the node once the generator can keep bus children nested.
     };
 };
 
@@ -100,6 +104,7 @@
         compatible = "qcom,mdss-dsi-ctrl";
         reg = <0x0 0xc994400 0x400>;
         #address-cells = <1>;
+        ranges;
         #size-cells = <0>;
         unixnu,adt-name = "dsi0";
 
@@ -114,7 +119,8 @@
             // Init sequence, timings and PHY settings are replayed from the
             // stock device tree: see inputs/r11-stock.dts, node
             // /soc/qcom,mdss_mdp@c900000/qcom,mdss_dsi_oppo16051samsung_s6e3fa3_1080p_cmd
-            unixnu,adt-name = "panel";
+            // panel is deliberately unexported for the same reason as touchscreen:
+            // its reg is a DSI virtual channel (0), not a physical address.
             status = "okay";
         };
     };

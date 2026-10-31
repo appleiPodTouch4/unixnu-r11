@@ -31,6 +31,12 @@ partition geometry for the OPPO R11 (CPH1707 / model 16051, SDM660).
    `/reserved-memory/splash_region`; adding it again makes `fdtput` fail.
 5. **`fastboot boot`, not `fastboot flash boot`.** `boot` is 64 MiB, the payload
    is 192 MiB.
+6. **Only MMIO nodes carry `unixnu,adt-name`.** The generator makes every tagged
+   node a *direct* child of `/arm-io` and rewrites its `reg` as
+   `physical address - arm-io base`, so a cpu node (reg = MPIDR affinity 0x0) or a
+   nested bus device (i2c slave 0x20, DSI virtual channel 0) drags the base below
+   the 16 MiB alignment and `/arm-io` is rejected. `/cpus` is built separately
+   from the same `cpu@N` children, so the cpu nodes must stay untagged.
 
 ## Commands
 

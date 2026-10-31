@@ -14,7 +14,7 @@ paths = ["board.toml", "feeds.toml", "configs/**", "patches/**", ".github/**", "
 inputs = ["SDM660 shared support (../UniXNU-sdm660-common), iPadOS 17.7.11 build 21H461 profile, r11 defconfig.", "OFP package model 16051: boot.img, gpt_main0.bin, xbl.elf."]
 configuration = ["schema_version = 2; board.soc_source = sdm660; board.os_profile = ipados-17.7.11-21H461.", "kernel.defconfig = r11_defconfig; fragments arch + soc + os; device patch series present but empty.", "kernel.archives lists the arch-profile scripts because arrays replace inherited arrays."]
 procedure = ["python3 scripts/extract-inputs.py --ofp ../ofp_extracted", "./unixnu defconfig r11_defconfig -D ../UniXNU-r11", "./unixnu status --json -D ../UniXNU-r11"]
-findings = ["The OFP boot image carries three appended device trees for board-id subtypes 0x3eb3, 0x3ee7 and 0x3ef6; 0x3eb3 is the 16051 tree and is the one committed as inputs/r11-stock.dtb.", "The stock device tree leaves /memory at zero because ABL patches it from SMEM, so the 4 GiB window is taken from hardware measurement and must be confirmed on the target device.", "The SoC layer has no published repository yet; feeds.toml points at a sibling checkout, so the build is not reproducible from a clean clone until it is pushed and pinned."]
+findings = ["The OFP boot image carries three appended device trees for board-id subtypes 0x3eb3, 0x3ee7 and 0x3ef6; 0x3eb3 is the 16051 tree and is the one committed as inputs/r11-stock.dtb.", "The stock device tree leaves /memory at zero because ABL patches it from SMEM, so the 4 GiB window is taken from hardware measurement and must be confirmed on the target device.", "The SoC layer has no published repository yet; feeds.toml points at a sibling checkout, so the build is not reproducible from a clean clone until it is pushed and pinned.", "The arm-io window is derived, not declared: arm_io_window() takes the lowest and highest exported register range and aligns them to 16 MiB, and it rejects a zero base. With the cpu, i2c-slave and DSI-panel nodes untagged the window is base 0x03000000 size 0x84000000, and arm-io gets ten children (interrupt-controller, timer, tlmm, spmi, emmc, i2c1, mdss, dsi0, smem, imem)."]
 completion = ["defconfig and status resolve arch, SoC, OS and device layers; every referenced file exists."]
 limits = ["SoC source is local, not pinned. No unixnu.lock yet: nothing git-hosted is selected besides the UniXNU defaults."]
 next_action = ["Push UniXNU-sdm660-common, switch feeds.toml to git plus a commit, run unixnu fetch and commit unixnu.lock."]
@@ -50,7 +50,7 @@ paths = ["dts/r11.dts", "configs/r11_defconfig"]
 inputs = ["8 cores in two clusters: MPIDR 0x0-0x3 (A53 class, part 0x801) and 0x100-0x103 (A73 class, part 0x800).", "GICv3 distributor 0x17a00000 and redistributors 0x17b00000 (8 x 0x20000), 19.2 MHz arch timer, PSCI over SMC."]
 configuration = ["dts/r11.dts includes sdm660.dtsi and tags cpu0-3 as E and cpu4-7 as P with unixnu,cluster-type.", "Kernel arguments r11-smp=1 and armcpu-spi-ipi=1."]
 procedure = ["Compile dts/r11.dts, inspect the ADT cpu nodes and the /arm-io ranges.", "Record per-CPU entry and timer/IPI delivery on the device."]
-findings = ["SDM660 exposes both clusters with 4 cores each; per-CPU reg values are affinities, not indices, so ADT output must keep 0x100-0x103 for the gold cluster.", "The arch timer interrupts are PPI 13/14/11/10, matching the SDM660 platform include used by the firmware."]
+findings = ["SDM660 exposes both clusters with 4 cores each; per-CPU reg values are affinities, not indices, so ADT output must keep 0x100-0x103 for the gold cluster.", "The arch timer interrupts are PPI 13/14/11/10, matching the SDM660 platform include used by the firmware.", "The cpu@N nodes carry no unixnu,adt-name: the generator exports a tagged node as a direct child of /arm-io and rewrites reg as physical address minus the arm-io base, so an exported cpu would place affinity 0x0 below the 16 MiB base. /cpus is built from these same children instead, and the resulting ADT has cpu0-7 in MPIDR order under /cpus."]
 completion = ["All eight CPUs reach their entry checkpoint and the timer ticks on every core."]
 limits = ["No CPU frequency or idle driver: r11-cpufreq is passed but no board driver implements it."]
 next_action = ["Record the first ARMCPU checkpoint from a device boot with serial=3 and the framebuffer console."]
@@ -157,11 +157,11 @@ components = ["XnuPrelink", "DarwinBoot"]
 paths = ["board.toml", "inputs/hw.json", "inputs/partitions.json"]
 inputs = ["Stock boot image header: version 0, page 4096, kernel 0x8000, ramdisk 0x1000000, tags 0x100, second 0xf00000.", "IPSW: iPad Pro 17.7.11 (21H461), product iPad7,1, chip_id 0x8011."]
 configuration = ["[bootimg.image] mirrors the stock header; [payload] volume R11ESP, size 192 MiB, loader firmware.", "No [[bootimg.dtb_node]]: the stock tree already has /reserved-memory/splash_region."]
-procedure = ["./unixnu build payload --unique-chip-id <hex> --trust-cache <bundle>", "./unixnu bootimg -D ../UniXNU-r11 --uefi ../uefi-r11-base --dtb ../uefi-r11-base/Platforms/OPPO/r11Pkg/DeviceTree/r11.dtb"]
-findings = ["OPPO uses tags 0x100 rather than the usual 0x1e00000; bootimg verifies the load addresses and rejects a wrong offset.", "The boot partition is 64 MiB while the payload is 192 MiB, so the image must go through fastboot boot, not fastboot flash boot.", "The stock boot image is gzip(Image) plus a multi-DTB block of three trees; the firmware DTB for bootimg is the single 16051 tree."]
+procedure = ["./unixnu build kernel -D ../UniXNU-r11 (macOS 12 host, scripts/xnu-clang)", "./unixnu build payload --unique-chip-id <hex> --trust-cache <bundle>", "./unixnu bootimg -D ../UniXNU-r11 --uefi ../uefi-r11-base --dtb ../uefi-r11-base/Platforms/OPPO/r11Pkg/DeviceTree/r11.dtb"]
+findings = ["OPPO uses tags 0x100 rather than the usual 0x1e00000; bootimg verifies the load addresses and rejects a wrong offset.", "The boot partition is 64 MiB while the payload is 192 MiB, so the image must go through fastboot boot, not fastboot flash boot.", "The stock boot image is gzip(Image) plus a multi-DTB block of three trees; the firmware DTB for bootimg is the single 16051 tree.", "Measured on this host: kernel.macho 53,792,768 bytes (prelinked, sha256 7cf8d413d5c7edcf...), ADT 15,688 bytes, payload.img 201,326,592 bytes, boot.img 202,670,080 bytes with kernel (BootShim) 1,338,688 bytes at 0x8000 and the payload as ramdisk at 0x1000000. The payload volume holds EFI/UniXNU/unixnu.toml, Payloads/kernel.macho and Payloads/kernel.macho.adt."]
 completion = ["boot.json reports the expected kernel address, tags address and a nonzero ramdisk size, and the image boots to the UniXNU menu."]
 limits = ["Payload size assumes fastboot boot with max-download 512 MiB (reported by getvar on the reference unit)."]
-next_action = ["Capture boot.json from the first device attempt and record it as evidence."]
+next_action = ["fastboot boot the 202,670,080-byte image with the chip id seed set and capture the first serial checkpoint after the UniXNU menu selects xnu."]
 
 [[area.evidence]]
 kind = "source"
@@ -171,7 +171,7 @@ result = "Stock boot image header fields that board.toml [bootimg.image] mirrors
 [[area.evidence]]
 kind = "source"
 reference = "docs/host-toolchain.md"
-result = "The 60 arch/SoC patches and the archive builders pass on macOS 12; the XNU compile itself needs Xcode 15 or newer because mig emits -mach_msg2, which Apple clang 14 and LLVM 15 both reject. Use .github/workflows/macos.yml until a newer host is available."
+result = "The 60 arch/SoC patches and the archive builders pass on macOS 12, and so does the kernel step: scripts/xnu-clang hides the three Xcode 15 arguments, two board patches replace the mig static_asserts, CCC_OVERRIDE_OPTIONS clears the archive -Werror pair, and an iig patch declares IORPCMessageFromMach in the generated sources. .github/workflows/macos.yml stays available but is no longer required."
 
 [[area]]
 id = "diagnostics"
