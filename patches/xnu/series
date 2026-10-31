@@ -9,3 +9,11 @@
 zzz-boot-progress.patch
 component:XnuPrelink/patches/xnu-10063.141.1-security-init.patch
 component:XnuPrelink/patches/xnu-10063.141.1-sparse-index.patch
+# Host-toolchain workaround, not a behaviour change: osfmk/ipc/mach_port.c
+# asserts on a const local, which is not an integer constant expression in C.
+# Xcode 15's clang folds it, Xcode 14's does not. See scripts/xnu-clang for the
+# other two arguments this host has to rewrite.
+zzzz-host-clang-static-assert.patch
+# Same class, same reason: libkern/os/log.c asserts that two macro aliases have
+# the same address, which Xcode 14's clang will not fold into a constant.
+zzzz-host-clang-xnupost-assert.patch

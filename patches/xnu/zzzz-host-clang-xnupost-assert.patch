@@ -1,0 +1,13 @@
+--- a/libkern/os/log.c
++++ b/libkern/os/log.c
+@@ -1147,8 +1147,6 @@
+ #ifdef CONFIG_XNUPOST
+ 
+-static_assert(&_os_log_default == OS_LOG_DEFAULT,
+-    "OS_LOG_DEFAULT is an alias to _os_log_default");
+-static_assert(OS_LOG_DISABLED == NULL,
+-    "OS_LOG_DISABLED handle is defined as NULL");
++/* Xcode 15's clang folds these two address comparisons at compile time; Xcode
++ * 14's rejects them as non-constant. They only restate the aliases above. */
+ 
+ #include <dev/random/randomdev.h>

@@ -84,6 +84,11 @@ BUILDID_STRING = "r11"
 
 [payload]
 volume = "R11ESP"
+# Adds "Tools" to the generated boot menu, which is where AdvancedLogDxe
+# registers itself (Tools -> Advanced Logger -> QR pages of the firmware log).
+# R11 has no exposed UART, so this is the only way to read anything the
+# firmware printed before ExitBootServices.
+tools = true
 # The image is booted with "fastboot boot": boot is only 64 MiB
 # (GPT: 245760-376831), so a flashed image has to stay under that.
 size_mib = 192

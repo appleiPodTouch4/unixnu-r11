@@ -1,0 +1,54 @@
+#!/bin/bash
+# Compiler shim for building xnu-10063 (Darwin 23.6) with Xcode 14.
+#
+# XNU 10063 is an iOS 17 kernel, and its makefiles pass two arguments that only
+# Xcode 15+ accepts. Both are cheap to rewrite, so a macOS 12 host can build the
+# kernel instead of being limited to the firmware:
+#
+#   -mach_msg2
+#       An argument for Xcode 15's migcom. The Xcode 14 migcom in this host does
+#       not know it, so it forwards it to the C compiler it runs on the generated
+#       stubs, where clang stops with "unknown argument". Dropping it makes mig
+#       emit the older mach_msg_trap stubs, which the kernel trap table still
+#       carries. This is a codegen-path difference, not an ABI break.
+#
+#   -ftrivial-auto-var-init=zero
+#       Apple clang 14 implements the flag but gates it behind
+#       -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang.
+#       Passing that gate is exactly the semantics XNU asks for: automatic
+#       variables are zero initialised.
+#
+# Everything else is forwarded verbatim, so this can stand in for CC, CXX and
+# MIGCC. scripts/build-xnu-4k-baseline.sh reads CC and CXX from XNU_CC and
+# XNU_CXX; the second is a symlink to this file, and the "++" in its name
+# selects clang++.
+
+set -euo pipefail
+
+case "$(basename "$0")" in
+  *++*) clang=${XNU_CLANGXX:-/usr/bin/clang++} ;;
+  *)    clang=${XNU_CLANG:-/usr/bin/clang} ;;
+esac
+
+args=()
+gated=0
+
+for arg in "$@"; do
+  case "$arg" in
+    -mach_msg2)
+      continue
+      ;;
+    -ftrivial-auto-var-init=zero)
+      args+=("$arg")
+      gated=1
+      continue
+      ;;
+  esac
+  args+=("$arg")
+done
+
+if [ "$gated" = 1 ]; then
+  args+=(-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang)
+fi
+
+exec "$clang" "${args[@]}"

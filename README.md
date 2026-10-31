@@ -77,11 +77,23 @@ fastboot boot out/r11/ipados-17.7.11-21H461/r11/boot/boot.img
 | `defconfig`, `fetch`, `tree` | Python 3.11+ | ok |
 | `build firmware` | `lld-link` (llvm@15 here) | ok, FD is exactly `0x300000` |
 | `bootimg` | `llvm-objcopy`, `llvm-nm` | ok |
-| `build kernel` | Apple clang with `-mach_msg2` (Xcode 15+) | **blocked** |
+| `build kernel` | Apple clang, plus `scripts/xnu-clang` | every file but one compiles; `iokit/DriverKit/OSObject.iig.cpp` fails |
 
-The kernel step is blocked because `xnu-10063` compiles mig output with
-`-mach_msg2`, which Apple clang 14 and LLVM 15 both reject; macOS 12 caps Xcode
-at 14.3. See `docs/host-toolchain.md` for the evidence and the workaround.
+`xnu-10063` expects Xcode 15's compiler, but the three arguments it chokes on
+here are all rewritable. `scripts/xnu-clang` (and its `xnu-clang++` symlink) drop
+`-mach_msg2` — which the host's `migcom` forwards to the compiler — and supply the
+gate Xcode 14 needs for `-ftrivial-auto-var-init=zero`. Two board patches fix
+compile-time assertions that only a newer clang folds. What is left is a version
+mismatch between the host's `iig` and `iokit/DriverKit/IORPC.h`. See
+`docs/host-toolchain.md` for the evidence and both ways out.
+
+### Firmware log
+
+The board has no exposed UART, so the firmware keeps a 1 MiB in-memory log at
+`0x9D300000` and ships `AdvancedLogDxe`, which exports it as QR codes under
+**Tools → Advanced Logger**. Recording works today; reading it back needs a
+payload, and a payload needs the kernel. `docs/firmware-log.md` has the details
+and the rollback image path.
 
 ### Building the kernel on a GitHub macOS runner
 
@@ -112,10 +124,11 @@ kernel-side storage, display, input and power drivers are not written; see
 | Hardware inputs from the OFP package | done (`inputs/`) |
 | Format 2 board configuration, DTS, defconfig | done; `defconfig` resolves all four layers |
 | UEFI platform package, FD layout, BootShim | builds here; boots on hardware (`fastboot boot`) |
+| Firmware log (`Advanced Logger` + QR exporter) | builds and ships in the FD; readable once a payload exists |
 | Vendor SDM660 DXE set | reused from a sibling UEFI device, profiles not R11-specific |
 | Display | simple framebuffer over the stock splash buffer; no MDSS/DSI driver |
 | Storage / input / power | no XNU driver (UEFI side works through vendor drivers) |
-| Kernel | patches and archives build; compile needs Xcode 15+ |
+| Kernel | ~700 sources compile here; one DriverKit file needs the `IORPC` port or Xcode 15+ |
 | Payload / boot image | `boot.img` builds (empty ramdisk); payload needs the kernel |
 
 ## Related

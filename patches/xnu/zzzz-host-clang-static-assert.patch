@@ -1,0 +1,11 @@
+--- a/osfmk/ipc/mach_port.c
++++ b/osfmk/ipc/mach_port.c
+@@ -2736,6 +2736,6 @@
+ 	if (options->flags & MPO_QLIMIT) {
+-		const mach_msg_type_number_t count = sizeof(options->mpl) / sizeof(int);
+-		static_assert(count >= MACH_PORT_LIMITS_INFO_COUNT);
++		/* A const local is not an integer constant expression in C. */
++		static_assert(sizeof(options->mpl) / sizeof(int) >= MACH_PORT_LIMITS_INFO_COUNT);
+ 
+ 		if (options->mpl.mpl_qlimit > MACH_PORT_QLIMIT_MAX) {
+ 			return KERN_INVALID_VALUE;
