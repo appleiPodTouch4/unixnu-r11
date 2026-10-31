@@ -89,6 +89,20 @@ volume = "R11ESP"
 # R11 has no exposed UART, so this is the only way to read anything the
 # firmware printed before ExitBootServices.
 tools = true
+# Entry probe + panic screen. The kernel branch was reached on 2026-11-01 but
+# nothing printed after the green handoff bar and the device did not reset, so
+# the kernel is either stuck or running silently before its own console exists.
+# The probe paints blue (kernel entry, MMU off) and magenta (before MMU enable)
+# bands below the green one; panic() output renders on the framebuffer with the
+# FrameBufferSerialPortLib font from the Mu-Silicium tree, which is why payload
+# needs --uefi.
+#
+# No entry_probe_reset_delay: the stage-3 cave would push the panic screen past
+# the end of the post-_start padding (screen is 0xA2F bytes, the stage-1..3
+# layout leaves 0x9D0; without stage 3 it starts one cave earlier and 0xA30
+# fits). The panic screen is the better signal anyway -- a panic anywhere after
+# the MMU is on is visible with full text, not just a timed reset.
+panic_screen = true
 # The image is booted with "fastboot boot": boot is only 64 MiB
 # (GPT: 245760-376831), so a flashed image has to stay under that.
 #
