@@ -1,0 +1,56 @@
+# R11: make the SDHCI identity registers readable, and give the panel row a real
+# meaning.
+#
+# boot-irq19's verdict was "EMMC st=7 err=60 blk=0" and nothing else: the panel's
+# "EMMC step=.. ver=.. caps=.." row belongs to the sirius port and reads
+# sirius_emmc_* globals, whose weak char[] stubs in BootProgressStubs.c are all
+# zero -- so the row had always displayed zeros, not measurements. In particular
+# caps=0 was NOT evidence that the block returns zero.
+#
+# This patch defines those globals for real and fills them:
+#  * step is the source line of the last BP_STAGE checkpoint, so a photograph names
+#    the exact line the driver reached instead of an opaque counter;
+#  * version/caps/present-state/clock-control/power-control are read immediately
+#    after ml_io_map() of the two SDHCI windows, before any clock or reset write,
+#    which separates "the block is not clocked (reads return 0)" from "the CMD
+#    sequence timed out".
+#
+# boot-irq20 died learning that VERSION is a 16-bit register at 0xfe: reading it
+# with the 32-bit hc_rd() is an unaligned access and panics ("Unaligned kernel
+# data abort", far=...0fe). irq21 uses hc_rd16.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -47,7 +47,15 @@
+ volatile uint32_t qcom_emmc_stage;
+ volatile int32_t qcom_emmc_err;
+ volatile uint64_t qcom_emmc_blocks;
+-#define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage++; } while (0)
++/* boot-irq20: the panel's "EMMC step=.." row (BootProgress.c) reads these
++ * sirius-era names; the char[] versions in BootProgressStubs.c are weak, so these
++ * strong definitions win and the row finally reports real registers. Semantics
++ * follow the row's own comment: step = source line of the last checkpoint (so a
++ * photograph names it exactly), ver/caps/st/clk/pwr = the SDHCI registers read
++ * immediately after the window is mapped, halts bit0 apps, bit1 ahb gated. */
++volatile unsigned int sirius_emmc_step, sirius_emmc_version, sirius_emmc_caps,
++    sirius_emmc_state, sirius_emmc_clock, sirius_emmc_power, sirius_emmc_halts;
++#define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage = __LINE__; sirius_emmc_step = __LINE__; } while (0)
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+@@ -760,6 +768,16 @@
+ 		return ENXIO;
+ 	}
+ 	BP_STAGE("emmc: regs ok");
++	/* First real reads of the block: a zero VERSION/CAPABILITIES means the SDCC
++	 * branch is not clocked (the NoC returns 0 rather than stalling), which is a
++	 * different failure from a CMD timeout and must not be confused with one.
++	 * VERSION lives at 0xfe and is 16-bit wide: a 32-bit read there is an
++	 * unaligned data abort (boot-irq20 died exactly that way), hence hc_rd16. */
++	sirius_emmc_version = hc_rd16(0xfe);
++	sirius_emmc_caps = hc_rd(SDHCI_CAPABILITIES);
++	sirius_emmc_state = hc_rd(SDHCI_PRESENT_STATE);
++	sirius_emmc_clock = hc_rd16(SDHCI_CLOCK_CONTROL);
++	sirius_emmc_power = hc_rd8(0x29);	/* Power Control: no macro in this file */
+ 	error = emmc_clocks();
+ 	if (error) {
+ 		return error;

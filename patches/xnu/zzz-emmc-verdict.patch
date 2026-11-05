@@ -1,0 +1,69 @@
+# R11: make the eMMC probe's verdict readable, and stop bdevvp() from panicking.
+#
+# boot-irq18 reached vfs_mountroot (the IOKitBSDInit panic is gone) and panicked in
+# bdevvp() -> VNOP_OPEN with "bdevvp failed: open": qcom_emmc_init() had not
+# produced a block device, so rootdev was still NODEV. The driver already reports
+# its progress through BP_STAGE(), but that lands on the panel's single stage row,
+# which the next stage call overwrites, and the console has no scrollback -- the
+# verdict was therefore unreadable in every photograph.
+#
+# This patch does two things:
+#  1. qcom_emmc.c keeps a numeric progress counter (incremented by BP_STAGE), the
+#     init error code and the partition size in globals that BootProgress.c paints
+#     as the "EMMC st=.. err=.. blk=.." panel row.
+#  2. vfs_subr.c returns ENXIO from the probe when it fails, instead of falling
+#     through to bdevvp() with rootdev == NODEV. bsd_init then stays in its
+#     "cannot mount root" retry loop with the panel live, so the next photograph
+#     shows the verdict instead of a panic screen.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -40,7 +40,14 @@
+ #include <libkern/libkern.h>
+ 
+ extern void boot_progress_stage(const char *text) __attribute__((weak));
+-#define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); } while (0)
++/* boot-irq19: numeric copy of the probe verdict, for the boot panel. The BP_STAGE
++ * text is written to the panel's stage row, which the next stage call overwrites,
++ * and the console has no scrollback; these words survive both, so a photograph
++ * always says how far qcom_emmc_init() got and what it returned. */
++volatile uint32_t qcom_emmc_stage;
++volatile int32_t qcom_emmc_err;
++volatile uint64_t qcom_emmc_blocks;
++#define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage++; } while (0)
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+@@ -821,6 +828,7 @@
+ 
+ 	if (!su.ready) {
+ 		int error = qcom_emmc_init();
++		qcom_emmc_err = error;
+ 		if (error) {
+ 			if (!reported) {
+ 				char line[72];
+@@ -833,5 +841,6 @@
+ 		}
+ 	}
+ 	*dev = su.bdev;
++	qcom_emmc_blocks = su.nblocks;
+ 	return 0;
+ }
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1251,6 +1251,16 @@
+ 				boot_progress_stage(stage);
+ 			}
+ 		}
++		if (emmc_state != 0) {
++			/*
++			 * No block device: return the failure instead of falling through
++			 * to bdevvp(rootdev == NODEV), whose VNOP_OPEN panics with
++			 * "bdevvp failed: open". bsd_init then keeps its "cannot mount
++			 * root" retry loop, the panel stays live, and the qcom_emmc_*
++			 * verdict below can be read off a photograph.
++			 */
++			return ENXIO;
++		}
+ 		if (emmc_state == 0 && rootdev == NODEV) {
+ 			char stage[64];
+ 

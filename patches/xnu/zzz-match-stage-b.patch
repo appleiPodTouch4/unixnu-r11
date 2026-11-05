@@ -1,0 +1,147 @@
+# Stage B of the root-pass observation (2026-11-03), split out of
+# zzz-match-observe.patch on purpose.
+#
+# Why a second file: the panel rows in package/BootProgress.c reference
+# r11_reg_*/r11_sm_*/r11_dsm_*. The first version of those counters was typed
+# straight into .cache/xnu-work and never made it into a patch, so the next time
+# the patch set changed (adding zzz-trustcache-skip.patch) prepare re-cloned the
+# tree, the definitions vanished and the link failed with
+#     "_r11_reg_enter", referenced from: _draw in libBootProgress.a
+# Keeping them in their own patch makes that failure impossible: this section's
+# line numbers are computed against the tree after zzz-match-observe.patch, and
+# it is applied immediately after it.
+#
+# What it answers, now that the pass really runs (PE_lockdown_iokit is at
+# osfmk/kern/startup.c:777, i.e. AFTER mac_policy_initmach and trust_cache_init):
+#
+#   r11_reg_enter/member/adjust/ok   one of registerService()'s two silent
+#                                    returns, or the road to startMatching()
+#   r11_reg_svcroot                  getServiceRoot() == this (attach(NULL) took)
+#   r11_sm_all/root/needcfg/sync      startMatching() called, named /device-tree,
+#                                    needConfig true, sync true
+#   r11_sm_inline/job                 which branch the root pass took
+#   r11_sm_state0/state1              __state[] at that moment (bit1 = NeedConfig)
+#   r11_dsm_all/root                  doServiceMatch() entries, unfiltered vs
+#                                    filtered -- if all>0 and root==0, the nub's
+#                                    getName() is not "device-tree" and row 4 is
+#                                    measuring nothing
+#
+# Diagnosis only, like zzz-match-observe.patch.
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -208,6 +208,25 @@
+ volatile unsigned r11_root_adt_why   = 0;            // its outcome code (r11_why_code)
+ volatile unsigned r11_root_adt_pc    = 0;            // root probeCandidates invocations
+ volatile unsigned r11_root_adt_probe = 0;            // ArmDTPlatform reached probe()
++// Stage B of the same hunt: with the root pass finally running, passes=0 would
++// again be ambiguous, so these split "registerService() returned early" from
++// "startMatching() declined to configure" from "doServiceMatch() saw another
++// service name". All of them are cheap 32-bit increments on the boot thread.
++volatile unsigned r11_reg_enter      = 0;            // registerService() on the root nub
++volatile unsigned r11_reg_member     = 0;            // bailed: not a registry member
++volatile unsigned r11_reg_adjust     = 0;            // bailed: platformAdjustService() false
++volatile unsigned r11_reg_ok         = 0;            // reached startMatching()
++volatile unsigned r11_reg_svcroot    = 0;            // getServiceRoot() == this
++volatile unsigned r11_sm_all         = 0;            // startMatching() calls, unfiltered
++volatile unsigned r11_sm_root        = 0;            // startMatching() calls on /device-tree
++volatile unsigned r11_sm_needcfg     = 0;            // needConfig was true for it
++volatile unsigned r11_sm_sync        = 0;            // sync was true for it
++volatile unsigned r11_sm_inline      = 0;            // root pass ran inline
++volatile unsigned r11_sm_job         = 0;            // root pass was queued as a job
++volatile unsigned r11_sm_state0      = 0xFFFFFFFFu;  // __state[0] at startMatching()
++volatile unsigned r11_sm_state1      = 0xFFFFFFFFu;  // __state[1] at startMatching()
++volatile unsigned r11_dsm_all        = 0;            // doServiceMatch() entries, unfiltered
++volatile unsigned r11_dsm_root       = 0;            // doServiceMatch() entries on /device-tree
+ }
+ 
+ static bool r11_is_root_svc(const char *n)
+@@ -1144,12 +1163,27 @@
+ 	}
+ 
+ 	if (parent != root) {
++		if (r11_is_root_svc(getName())) {
++			r11_reg_enter++;
++			r11_reg_member++;
++		}
+ 		IOLog("%s: not registry member at registerService()\n", getName());
+ 		return;
+ 	}
+ 
++	// Stage B: a silent return here (or a false needConfig in startMatching) is
++	// indistinguishable on the panel from "the pass ran and found nothing" --
++	// which is what every all-zero ROOT row looks like.
++	if (r11_is_root_svc(getName())) {
++		r11_reg_enter++;
++		r11_reg_svcroot = (getServiceRoot() == this) ? 1u : 0u;
++	}
++
+ 	// Allow the Platform Expert to adjust this node.
+ 	if (gIOPlatform && (!gIOPlatform->platformAdjustService(this))) {
++		if (r11_is_root_svc(getName())) {
++			r11_reg_adjust++;
++		}
+ 		return;
+ 	}
+ 
+@@ -1180,6 +1214,9 @@
+ 		IOLog( "%s\n", path );
+ 	}
+ 
++	if (r11_is_root_svc(getName())) {
++		r11_reg_ok++;
++	}
+ 	startMatching( options );
+ }
+ 
+@@ -1215,6 +1252,19 @@
+ 	needConfig =  (0 == (__state[1] & (kIOServiceNeedConfigState | kIOServiceConfigRunning)))
+ 	    && (0 == (__state[0] & kIOServiceInactiveState));
+ 
++	if (r11_is_root_svc(getName())) {
++		r11_sm_root++;
++		if (needConfig) {
++			r11_sm_needcfg++;
++		}
++		if (sync) {
++			r11_sm_sync++;
++		}
++		r11_sm_state0 = __state[0];
++		r11_sm_state1 = __state[1];
++	}
++	r11_sm_all++;
++
+ 	__state[1] |= kIOServiceNeedConfigState;
+ 
+ //    __state[0] &= ~kIOServiceInactiveState;
+@@ -1246,6 +1296,9 @@
+ 			IOLockUnlock( gIOServiceBusyLock );
+ 		} else if (!sync || (kIOServiceAsynchronous & options)) {
+ 			bp_name("sm job", getName());
++			if (r11_is_root_svc(getName())) {
++				r11_sm_job++;
++			}
+ 			// assertion will be released when matching job is complete
+ 			releaseAssertion = false;
+ 			_IOServiceJob::startJob( this, kMatchNubJob, options );
+@@ -1255,6 +1308,9 @@
+ 				bp_name("sm loop", getName());
+ 				if ((__state[1] & kIOServiceNeedConfigState)) {
+ 					bp_name("sm inline", getName());
++					if (r11_is_root_svc(getName())) {
++						r11_sm_inline++;
++					}
+ 					doServiceMatch( options );
+ 					bp_name("sm inline ret", getName());
+ 				}
+@@ -5453,6 +5509,11 @@
+ 	OSArray *           notifiers[2] = {NULL};
+ 	unsigned            r11_pass = 0;
+ 
++	r11_dsm_all++;
++	if (r11_is_root_svc(getName())) {
++		r11_dsm_root++;
++	}
++
+ //    job->nub->deliverNotification( gIOPublishNotification,
+ //                              kIOServiceRegisteredState, 0xffffffff );
+ 

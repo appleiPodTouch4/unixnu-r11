@@ -19,8 +19,9 @@ index d456318..2b7d5ba 100644
 +# The generated *.iig.cpp files call IORPCMessageFromMach() from their
 +# _Dispatch() methods. The iig that ships with this host emits that call for
 +# the #if KERNEL branch too, while iokit/DriverKit/IORPC.h declares the
-+# function only outside the kernel; the kernel keeps IORPCMessageFromMachReply()
-+# in iokit/Kernel/IOUserServer.cpp, which the board patch renames and exports.
++# function only outside the kernel. xnu-8796 already provides the kernel
++# definition (IORPCMessageFromMach(msg, reply) in iokit/Kernel/IOUserServer.cpp),
++# so only the declaration is missing and only for iig-generated sources.
 +#
 +# The declaration is injected into the generated source by the awk step in the
 +# %.h : %.iig rule above, right after iig's own "/* @iig end */" marker, i.e.
@@ -33,48 +34,3 @@ index d456318..2b7d5ba 100644
 +# .iig.cpp is regenerated: delete build/xnu/ios-obj/*/iokit/DriverKit/*.iig.cpp
 +# to force it.
 +#
-diff --git a/iokit/Kernel/IOUserServer.cpp b/iokit/Kernel/IOUserServer.cpp
-index b14ca9c..c59bec1 100644
---- a/iokit/Kernel/IOUserServer.cpp
-+++ b/iokit/Kernel/IOUserServer.cpp
-@@ -3589,15 +3589,24 @@ IOUserServer::rpc(IORPC rpc)
- 
- /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
- 
--static IORPCMessage *
--IORPCMessageFromMachReply(IORPCMessageMach * msg)
-+/*
-+ * Kernel half of the IORPC accessor that the iig-generated Dispatch() methods
-+ * call. iokit/DriverKit/IORPC.h declares IORPCMessageFromMach() only outside
-+ * the kernel: those headers are not part of this tree (prepare-xnu-source.py
-+ * restores them from Apple's public source) and there the prototype sits under
-+ * #ifndef KERNEL. The iig that ships with the host Xcode nevertheless emits an
-+ * unguarded call from every *.iig.cpp _Dispatch(). The body below is the reply
-+ * side, which already read the same flag as a local; the wrapper keeps the
-+ * in-kernel callers unchanged.
-+ */
-+extern "C" IORPCMessage *
-+IORPCMessageFromMach(IORPCMessageMach * msg, bool reply)
- {
- 	mach_msg_size_t              idx, count;
- 	mach_msg_port_descriptor_t * desc;
- 	mach_msg_port_descriptor_t * maxDesc;
- 	size_t                       size, msgsize;
- 	bool                         upgrade;
--	bool                         reply = true;
- 
- 	msgsize = msg->msgh.msgh_size;
- 	count   = msg->msgh_body.msgh_descriptor_count;
-@@ -3629,6 +3638,12 @@ IORPCMessageFromMachReply(IORPCMessageMach * msg)
- 	return (IORPCMessage *)(uintptr_t) desc;
- }
- 
-+static IORPCMessage *
-+IORPCMessageFromMachReply(IORPCMessageMach * msg)
-+{
-+	return IORPCMessageFromMach(msg, true);
-+}
-+
- ipc_port_t
- IOUserServer::copySendRightForObject(OSObject * object, ipc_kobject_type_t type)
- {

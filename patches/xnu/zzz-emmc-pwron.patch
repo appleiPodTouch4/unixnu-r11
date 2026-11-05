@@ -1,0 +1,65 @@
+# R11: request eMMC bus power and complete the PMIC handshake before any command.
+#
+# boot-irq32 published CORE_PWRCTL_STATUS and found 0x1 -- BUS_OFF -- but it sampled
+# the register before the SDHCI bus-power bit was ever set, and it acknowledged
+# before asking. sdhci-msm's handler shows the real order: the PMIC acts on the bus
+# power the AP requests, reports the transition in CORE_PWRCTL_STATUS, and the AP
+# completes it by writing the matching success bit to CORE_PWRCTL_CTL and clearing
+# the status. Nothing in this driver ever waited for that completion.
+#
+# This patch sets the bus-power bit at 3.3 V, polls CORE_PWRCTL_STATUS for up to
+# 200 ms, acknowledges whatever transition the PMIC reports, then does the same at
+# 1.8 V (this board's vqmmc is fixed at 1.8 V), and only afterwards sends CMD0. The
+# status nibble seen after each request is published as pwrctl=, so the panel can
+# tell "the PMIC never reported a transition" from "it did, and the card is still
+# mute", which is the difference between a missing rail and a dead card.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -613,6 +613,47 @@
+ 	hc_wr8(SDHCI_HOST_CONTROL + 1, 0x0bu);
+ 
+ 	/*
++	 * boot-irq33: the previous round read CORE_PWRCTL_STATUS before asking for bus
++	 * power and saw only BUS_OFF. The handshake is the other way round: the PMIC
++	 * acts on the SDHCI bus-power bit and reports through CORE_PWRCTL_STATUS, and
++	 * the AP must acknowledge each request through CORE_PWRCTL_CTL before the card
++	 * really has its rails. So request power at 3.3 V, wait for and acknowledge the
++	 * event, then repeat at 1.8 V (this board's vqmmc is fixed 1.8 V), and only
++	 * then send CMD0. The two status nibbles are published as pwrctl= so the panel
++	 * distinguishes "PMIC never answered" from "answered and still mute".
++	 */
++	{
++		static const uint8_t kPwr[2] = { 0x0fu, 0x0bu };	/* 3.3 V, then 1.8 V */
++		uint32_t packed = 0;
++		for (int i = 0; i < 2; i++) {
++			uint64_t d = timeout_ns(200ull * NSEC_PER_MSEC);
++			uint32_t st = 0;
++			hc_wr8(SDHCI_HOST_CONTROL + 1, kPwr[i]);
++			for (;;) {
++				st = hc_rd(CORE_PWRCTL_STATUS) & 0xfu;
++				if (st) {
++					uint32_t ack = 0;
++					if (st & (CORE_PWRCTL_BUS_ON | CORE_PWRCTL_BUS_OFF)) {
++						ack |= CORE_PWRCTL_BUS_SUCCESS;
++					}
++					if (st & (CORE_PWRCTL_IO_LOW | CORE_PWRCTL_IO_HIGH)) {
++						ack |= CORE_PWRCTL_IO_SUCCESS;
++					}
++					hc_wr(CORE_PWRCTL_CTL, ack);
++					hc_wr(CORE_PWRCTL_CLEAR, st);
++					break;
++				}
++				if (!wait_deadline(d)) {
++					break;
++				}
++			}
++			packed = (packed << 4) | (st & 0xfu);
++		}
++		sirius_emmc_pwrctl = packed;
++		BP_STAGE((packed & 0xfu) ? "emmc: pwr bus_on" : "emmc: pwr no event");
++	}
++
++	/*
+ 	 * boot-irq24's CMD1 came back with a real error bit and CMD-inhibit still set.
+ 	 * The bootloader used this card to read the payload and left it in Transfer
+ 	 * state with a partition selected, where CMD1 does not answer; the comment

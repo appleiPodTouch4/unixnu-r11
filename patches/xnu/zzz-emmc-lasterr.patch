@@ -1,0 +1,41 @@
+# R11: give the eMMC command error code its own, unambiguous panel word.
+#
+# boot-irq25 and boot-irq26 both returned err=5 (EIO) yet the panel's h= field read
+# 0: h= packs (ERR_INT_STATUS << 16) | INT_STATUS and had already been overwritten
+# once by a later failure block, and at photograph resolution 0x8000 and 0x0 are
+# four characters apart. This patch adds qcom_emmc_lasterr, written only when a
+# command fails and never cleared, holding the SDHCI error status itself (or 0xEEEE
+# for a timeout with no error bit). BootProgress.c prints it as e=.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -55,6 +55,14 @@
+  * immediately after the window is mapped, halts bit0 apps, bit1 ahb gated. */
+ volatile unsigned int sirius_emmc_step, sirius_emmc_version, sirius_emmc_caps,
+     sirius_emmc_state, sirius_emmc_clock, sirius_emmc_power, sirius_emmc_halts;
++/* boot-irq27: the last command error code, in its own word. The panel row's h=
++ * field carried it for two rounds but was ambiguous to read off a photograph
++ * (0x8000 and 0 differ by four characters at that size) and had already been
++ * clobbered once; this one is only ever written, never cleared.
++ *   0x0000 = no command has failed yet
++ *   0x0001..0x00ff = SDHCI ERR_INT_STATUS of the failed command
++ *   0xEEEE = the wait timed out with no error bit set at all */
++volatile unsigned int qcom_emmc_lasterr;
+ #define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage = __LINE__; sirius_emmc_step = __LINE__; } while (0)
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -294,6 +302,7 @@
+ 			/* Publish before clearing: boot-irq24 returned EIO but the panel read
+ 			 * h=0 because the status had already been written back. */
+ 			sirius_emmc_halts = ((uint32_t)err << 16) | hc_rd16(SDHCI_INT_STATUS);
++			qcom_emmc_lasterr = err ? err : 0x8000u;
+ 			hc_wr16(SDHCI_ERR_INT_STATUS, err);
+ 			hc_wr16(SDHCI_INT_STATUS, SDHCI_INT_ERROR);
+ 			printf("R11 eMMC: int error %04x waiting for %04x\n", err, bit);
+@@ -301,6 +310,7 @@
+ 		}
+ 		if (!wait_deadline(deadline)) {
+ 			sirius_emmc_halts = 0xdead0000u | hc_rd16(SDHCI_INT_STATUS);
++			qcom_emmc_lasterr = 0xEEEEu;
+ 			printf("R11 eMMC: timeout waiting for int %04x\n", bit);
+ 			return ETIMEDOUT;
+ 		}

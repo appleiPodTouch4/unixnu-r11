@@ -1,0 +1,200 @@
+# Root-match observation (2026-11-03). Diagnosis only: no behaviour change.
+#
+# The panel's stage history is six rows deep. The root match pass is the first
+# one StartIOKitMatching runs, and every later service matched on the boot
+# thread (IOResources, IOReportHub, ...) pushes it out of the window. Every
+# photograph therefore shows the LAST pass and never the root one, so "DT cfg=0"
+# could never be attributed to either of its two possible causes:
+#
+#   (a) findDrivers() returned nothing for /device-tree  -> catalogue problem
+#       (personality missing, or IOProviderClass not indexed under
+#       IOPlatformExpertDevice)
+#   (b) it returned candidates but ArmDTPlatform was dropped
+#       (matchPassive no-match / no-module / cat-held), never probed, or
+#       allocClassWithName failed
+#
+# This patch keeps the root pass on permanent counters instead of in the
+# scrolling history, so one boot answers (a) vs (b):
+#
+#   r11_root_passes   doServiceMatch rounds seen for /device-tree
+#   r11_root_found    findDrivers() count for /device-tree (0xFFFFFFFF = never)
+#   r11_root_cands    probeCandidates() candidate count for /device-tree
+#   r11_root_fam      survivors after matchPassive (the stage that instantiates)
+#   r11_root_adt_in   times ArmDTPlatform appeared as a candidate
+#   r11_root_adt_why  its outcome code: 1 ok, 2 no-match, 3 no-module,
+#                     4 cat-held, 5 nomem, 6 repl, 7 rematch, 8 other
+#   r11_root_adt_pc   root probeCandidates invocations
+#   r11_root_adt_probe  ArmDTPlatform reached probe()
+#
+# Read out on the "ROOT" panel row (package/BootProgress.c).
+#
+# The same patch also turns the root pass's dispatch into a boot argument
+# instead of a rebuild (IOPlatformExpert.cpp, startIOServiceMatching). Stock
+# 8796 calls registerService() with no options, i.e. the pass is deferred to the
+# config thread; zzz-match-trace.patch replaced that with
+# registerService(kIOServiceSynchronous) so the pass would run on the boot
+# thread and be visible. That swap is the only change that lines up with
+# ArmDTPlatform going from "configure finished" to "configure never entered":
+#
+#   iPadOS 17.7.11 line, deferred pass   cfg=1  dev=10 bus=1 nv=1  (bpsync1)
+#   iPadOS 17.7.11 line, inline pass     cfg=48                    (cfg1/cfg2)
+#   iOS 16.5 line,       inline pass     cfg=0                     (all of 11-02)
+#
+# So the choice becomes r11-root-async:
+#   1  stock deferred pass (config thread)
+#   0  inline pass on the boot thread (default, keeps previous behaviour)
+# Both paths paint the same ROOT counters, so either way one boot still reports
+# whether the root pass ran and what findDrivers() returned for it.
+#
+# Remove this patch together with zzz-match-trace.patch once the root pass is
+# understood: it is a bisect instrument, not a working configuration.
+#
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -189,6 +189,46 @@
+ 	return (unsigned)r11_cached;
+ }
+ 
++// Root-match observation (see the header of zzz-match-observe.patch). The panel
++// keeps only a handful of stage rows, so the FIRST match pass -- the one that
++// decides whether ArmDTPlatform ever runs -- is always overwritten by the
++// services matched later on the boot thread (IOResources, IOReportHub, ...).
++// After boot every photograph of the history shows those later marks and never
++// the root pass, which is why "DT cfg=0" could not be attributed to either
++// "no candidate" or "candidate rejected". These counters keep the root pass
++// readable on a permanent row instead of in the history.
++//
++// 0xFFFFFFFF means "not reached yet"; 0 is a real observation (empty set).
++extern "C" {
++volatile unsigned r11_root_passes    = 0;            // doServiceMatch rounds for /device-tree
++volatile unsigned r11_root_found     = 0xFFFFFFFFu;  // findDrivers() result for /device-tree
++volatile unsigned r11_root_cands     = 0xFFFFFFFFu;  // probeCandidates() candidate count
++volatile unsigned r11_root_fam       = 0xFFFFFFFFu;  // survivors after matchPassive
++volatile unsigned r11_root_adt_in    = 0;            // times ArmDTPlatform was a candidate
++volatile unsigned r11_root_adt_why   = 0;            // its outcome code (r11_why_code)
++volatile unsigned r11_root_adt_pc    = 0;            // root probeCandidates invocations
++volatile unsigned r11_root_adt_probe = 0;            // ArmDTPlatform reached probe()
++}
++
++static bool r11_is_root_svc(const char *n)
++{
++	return n && !strcmp(n, "device-tree");
++}
++
++// Outcome codes as painted by the panel row. Keep in sync with BootProgress.c.
++static unsigned r11_why_code(const char *w)
++{
++	if (!w) { return 0; }
++	if (!strcmp(w, "ok"))        { return 1; }
++	if (!strcmp(w, "no-match"))  { return 2; }
++	if (!strcmp(w, "no-module")) { return 3; }
++	if (!strcmp(w, "cat-held"))  { return 4; }
++	if (!strcmp(w, "nomem"))     { return 5; }
++	if (!strcmp(w, "repl"))      { return 6; }
++	if (!strcmp(w, "rematch"))   { return 7; }
++	return 8;
++}
++
+ static IOPlatformExpert *       gIOPlatform;
+ static class IOPMrootDomain *   gIOPMRootDomain;
+ const IORegistryPlane *         gIOServicePlane;
+@@ -3942,6 +3982,10 @@
+ 			boot_progress_stage(r11_b);
+ 		}
+ 	}
++	if (r11_is_root_svc(getName())) {
++		r11_root_adt_pc++;
++		r11_root_cands = (unsigned)matches->getCount();
++	}
+ 	unsigned r11_cand = 0;
+ 	while (!needReloc
+ 	    && (nextMatch = matches->getFirstObject())) {
+@@ -3969,6 +4013,9 @@
+ 			}
+ 		}
+ 		r11_cand++;
++		if (r11_cls && !strcmp(r11_cls, "ArmDTPlatform")) {
++			r11_root_adt_in++;
++		}
+ 		{
+ 			char r11_b[64];
+ 			snprintf(r11_b, sizeof(r11_b), "cand %u %.28s", r11_cand,
+@@ -4115,6 +4162,9 @@
+ 		} while (false);
+ 
+ 		bp_name(r11_why, r11_cls);
++		if (r11_cls && !strcmp(r11_cls, "ArmDTPlatform")) {
++			r11_root_adt_why = r11_why_code(r11_why);
++		}
+ 		OSSafeReleaseNULL(client);
+ 		OSSafeReleaseNULL(nextMatch);
+ 		OSSafeReleaseNULL(props);
+@@ -4130,6 +4180,9 @@
+ 			boot_progress_stage(r11_b);
+ 		}
+ 	}
++	if (r11_is_root_svc(getName())) {
++		r11_root_fam = familyMatches ? (unsigned)familyMatches->getCount() : 0xFFFFFFFFu;
++	}
+ 
+ 	if (familyMatches) {
+ 		while (!needReloc
+@@ -4192,6 +4245,9 @@
+ 
+ 				// & probe the new driver instance
+ 				bp_match_mark("probe", symbol->getCStringNoCopy());
++				if (!strcmp(symbol->getCStringNoCopy(), "ArmDTPlatform")) {
++					r11_root_adt_probe++;
++				}
+ #if IOMATCHDEBUG
+ 				if (debugFlags & kIOLogProbe) {
+ 					LOG("%s::probe(%s)\n",
+@@ -5421,6 +5477,10 @@
+ 				boot_progress_stage(r11_b);
+ 			}
+ 		}
++		if (r11_is_root_svc(getName())) {
++			r11_root_passes++;
++			r11_root_found = matches ? (unsigned)matches->getCount() : 0xFFFFFFFFu;
++		}
+ 		// the matches list should always be created by findDrivers()
+ 		if (matches) {
+ 			lockForArbitration();
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -2085,6 +2085,7 @@
+ }
+ 
+ extern "C" void boot_progress_stage(const char *text) __attribute__((weak));
++extern "C" int PE_parse_boot_argn(const char *arg_string, void *arg_ptr, int max_len);
+ 
+ bool
+ IOPlatformExpertDevice::startIOServiceMatching(void)
+@@ -2101,8 +2102,26 @@
+ 	 * timer interrupt yet, so a pass that blocks on a cross-thread wait can
+ 	 * never be observed or woken. Run the pass inline on the boot thread where
+ 	 * the boot-progress marks name the exact step it stops on.
++	 *
++	 * 2026-11-03: the deferred pass was still reachable through a cooperative
++	 * thread switch, and switching to the inline one is the only change that
++	 * demonstrably moved ArmDTPlatform::configure from "finished" to "never
++	 * entered" (iPadOS line: cfg=1 asynchronously, cfg=48 right after the
++	 * switch, and the whole iOS 16.5 line has read cfg=0). So the choice is a
++	 * boot argument now instead of a rebuild: r11-root-async=1 runs the stock
++	 * deferred pass, 0 (default) keeps the inline one. Both paths paint the
++	 * same ROOT counters in IOService.cpp, so either way one boot still says
++	 * whether the root pass ran and what findDrivers() returned for it.
+ 	 */
+-	registerService(kIOServiceSynchronous);
++	unsigned r11_async = 0;
++	PE_parse_boot_argn("r11-root-async", &r11_async, sizeof(r11_async));
++	if (r11_async) {
++		if (boot_progress_stage) boot_progress_stage("root: registerService async");
++		registerService();
++	} else {
++		if (boot_progress_stage) boot_progress_stage("root: registerService sync");
++		registerService(kIOServiceSynchronous);
++	}
+ 	if (boot_progress_stage) boot_progress_stage("root: registerService done");
+ 
+ 	return true;

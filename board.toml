@@ -7,7 +7,7 @@ schema_version = 2
 name = "r11"
 soc = "SDM660"
 soc_source = "sdm660"
-os_profile = "ipados-17.7.11-21H461"
+os_profile = "ios-16.5-20F66"
 description = "OPPO R11 (CPH1707): SDM660, PM660/PM660L, 1080x1920 AMOLED, 64 GiB eMMC"
 kit = "r11"
 
@@ -32,7 +32,7 @@ windows = [
 
 [kernel]
 defconfig = "r11_defconfig"
-config_fragments = ["arch:configs/common.config", "soc:configs/sdm660.config", "os:configs/ipados.config"]
+config_fragments = ["arch:configs/common.config", "soc:configs/sdm660.config", "os:configs/ios16.config"]
 # The OS profile series is not inherited: its zzz-boot-progress.patch carries
 # hunks against code that only the SM8550 sheng patches add. The board series
 # lists the same component patches plus a board copy of that patch.
@@ -106,14 +106,19 @@ panic_screen = true
 # The image is booted with "fastboot boot": boot is only 64 MiB
 # (GPT: 245760-376831), so a flashed image has to stay under that.
 #
-# The size is also bounded by what ABL accepts. Measurement on the reference
-# unit: an 8 MiB and a 32 MiB payload both boot to the UniXNU menu, a 64 MiB
+# The ABL measurement on the reference unit was taken with an uncompressed
+# ramdisk: an 8 MiB and a 32 MiB payload both boot to the UniXNU menu, a 64 MiB
 # payload produces no output at all. The reserved-memory node of the stock tree
-# starts at 0x85800000, so 0x81000000+0x05800000 is free by design and the limit
-# is enforced by ABL rather than by the memory map. Keep this as small as the
-# kernel allows: kernel.macho is 51.3 MiB, so 56 MiB is the first size that fits
-# it with room for the ADT and the boot menu.
-size_mib = 56
+# starts at 0x85800000, so 0x81000000+0x05800000 is free by design. bootimg
+# works around that by LZMA-packing the volume to roughly 6 MiB and letting
+# UniXNURamDiskDxe expand it, so ABL only ever sees the packed size. What bounds
+# size_mib is the 64 MiB boot partition, and the expansion itself, which the
+# driver caps at PAYLOAD_MAX_EXPANDED (0x04000000).
+#
+# 60 MiB, not 56: the 8796 prelinked kernel plus ADT and boot menu is 56.3 MiB
+# (59,080,523 bytes), and payload.py refuses any content above 95 % of the
+# volume.
+size_mib = 60
 loader = "firmware"
 title = "Boot"
 dram_size = "0xFE4C0000"      # must equal the /memory reg in dts/r11.dts
@@ -126,6 +131,125 @@ kernel_args = [
   "debug=0x14e",
   "kt_fixed_zones=120",
   "armcpu-diagnostics=1",
+  # BootProgress panel (kits/r11 BootProgress.c): boot_progress_init() bails out
+  # unless this exact boot-arg is present (opt 1 = stage panel, 2 = continuous).
+  # Without it the whole panel stays dormant and boot looks like the old
+  # silent green+blue+magenta runs.
+  #
+  # 2, not 1, since boot-irq12. Mode 1 is a DIAGNOSTIC mode: bp_poll() sets
+  # state.frozen at the 120 s observation limit (or after 30 s without a stage or
+  # I/O), and boot_progress_poll() then paints one frame, masks DAIF and spins in
+  # wfe forever. That parked the machine at S=0x12 on boot-irq11 while the kernel
+  # may well have been running -- the STOP banner it leaves behind is
+  # indistinguishable from a real hang. Mode 2 computes the same deadline and
+  # says so in the top bar without ever suspending the OS, which is what a boot
+  # bring-up needs.
+  "boot-progress=2",
+  # Paint from whichever thread records a stage or console line instead of waiting
+  # for the monitor thread's timer. The monitor only repaints on its tick, so an
+  # IRQ-off spin freezes the frame at the last draw -- not at the last stage -- and
+  # the panel then lies about where the boot stopped (the emmc1/emtrace1 rounds read
+  # a stale "PE_lockdown_iokit done" that way). With this on, a frozen panel names
+  # the stage that actually hung.
+  # =1 keeps the 50 ms throttle; =2 paints on every record, so the frame on screen
+  # is the literal last stage even when the boot thread is spinning somewhere that
+  # never yields again. Slower, but it removes the "was the frame stale?" question.
+  "boot-progress-sync=2",
+  # SMP (rmx1971 cpu-area recipe; parsed by drivers/ArmCpu/ArmCpu.cpp):
+  # sheng-smp=1 opts in to secondary startup, cpus=8 lets XNU parse the whole
+  # topology, armcpu-self-ipi=1 works around this GIC's SGI behaviour. The
+  # rmx1971 kernel's armcpu-timer-intid=19 does not exist in this kernel.
+  # ArmCpu::probe only sees CPU nubs once ArmDTPlatform::configure publishes
+  # them (panel TOPO "DT cfg=1 cpu=8"); with cfg=0 these args are inert.
+  # SMP bisect (2026-11-01): user confirmed smp1 (all three args) reproducibly
+  # kills the boot-progress panel; bprogress2 (none of them) is fine. Static
+  # analysis found no pre-console parse site for any of them (sched_amp not
+  # linked, ArmCpu parses are post-console). Bisect images:
+  #   boot-smp2.img = this args + sheng-smp=1 only
+  #   boot-smp3.img = this args + cpus=8 armcpu-self-ipi=1 only
+  # Round 2 result: smp2 (sheng-smp only) OK, smp3 (cpus=8 + self-ipi) kills.
+  # Round 3 bisect: boot-smp4.img = cpus=8 only; boot-smp5.img = self-ipi only.
+  # Re-enable whichever subset wins the bisect.
+  # Single-core first (2026-11-02). sheng-smp=1 used to be inert because
+  # ArmDTPlatform never published CPU nubs (cfg=0). Once configure() started
+  # reaching IODTPlatformExpert::configure, createNubs(/cpus) began registering
+  # the secondary CPU nubs too, and ArmCpu::probe accepts them whenever
+  # sheng-smp=1 -- so start() runs startSecondary()/startCPU() for each of them
+  # before the GIC is configured. That is a much better candidate for the
+  # "cfg frozen at 48, IRQ=0, idle=0" spin than anything else in that call.
+  # Secondary startup is a later milestone; drop it until the boot CPU's GIC and
+  # machine timer are actually up (IRQ counter moving on the panel).
+  # (history) sheng-smp=1 opted in to secondary startup in ArmCpu::probe;
+  # cpus=8 must stay off: this kernel is DEVELOPMENT_ARM64_BCM2837 whose
+  # board_config.h sets MAX_CPUS=4 / MAX_CPU_CLUSTERS=1, and
+  # ml_parse_cpu_topology() then trips assert(cluster_id < MAX_CPU_CLUSTERS)
+  # before the panel ever draws (bisect boot-smp4.img).
+  # NOTE: sheng-smp is deliberately ABSENT here; ArmCpu::probe then rejects every
+  # non-boot CPU nub, so createNubs(/cpus) can only start the boot CPU.
+  # Match-pass containment (zzz-match-trace.patch). The bpsync1 panel showed the
+  # SDM660 platform service being re-matched in a tight cycle over exactly three
+  # personalities -- AppleARMLightEmUp, AppleARMFabricTrace, IOExclaveProxy -- and
+  # then a hard stop, with no probe:/start: line ever printed. Those three are
+  # exclave support drivers; SDM660 has no exclave hardware, so on this port they
+  # can only fail. r11-skip-exclave drops them from the candidate set and logs
+  # "skp <class>" on the panel instead of letting them spin the pass.
+  "r11-skip-exclave=1",
+  # Match-pass completion (zzz-match-trace.patch). The match4 panel showed the
+  # six teardown breadcrumbs mt-a..mt-f all recorded -- the pass itself finishes --
+  # but never the "sm inline ret" that follows the call site, because the
+  # synchronous branch parks in assert_wait()+thread_block() waiting for the busy
+  # count to drain. That wakeup needs the machine timer; the timer interrupt only
+  # starts once ArmCpu probes, and ArmCpu probes off the very match pass that is
+  # blocked. TIMER ctl=5 (expired, unmasked) with DAIF=200 (IRQ open) but IRQ=0,
+  # plus "CPU IRQ phase=0 id=1023" and "PROBE calls=0", is that deadlock.
+  # This arg declines the wait so the pass returns and startup moves on.
+  "r11-match-nowait=1",
+  # Root-pass dispatch (zzz-match-observe.patch). Stock 8796's
+  # IOPlatformExpertDevice::startIOServiceMatching() calls registerService()
+  # with no options, which defers the first match pass to the config thread;
+  # zzz-match-trace.patch replaced it with registerService(kIOServiceSynchronous)
+  # so the pass would run inline on the boot thread and be readable on the panel.
+  # That swap is the only change that lines up with ArmDTPlatform::configure going
+  # from "finished" to "never entered":
+  #   iPadOS line, deferred  -> DT cfg=1 dev=10 bus=1 nv=1   (boot-bpsync1)
+  #   iPadOS line, inline    -> DT cfg=48                    (boot-cfg1/cfg2)
+  #   iOS 16.5,   inline     -> DT cfg=0                     (every 11-02 image)
+  # 1 = stock deferred pass (config thread), 0 = inline on the boot thread.
+  # CAUTION (2026-11-03 21:00): boot-rootmatch1/2 and boot-rootreg1 all read
+  # zero, but those readings mean nothing. kernel_bootstrap() reaches
+  # PE_lockdown_iokit() (startup.c:777, the first match pass) only after
+  # mac_policy_initmach() (:723) and trust_cache_init() (:742), and all three
+  # boots panicked at mac_policy_initmach -- the pass had not started yet, so
+  # registerService() was never called and ROOT/REG/SM/DSM were all measuring an
+  # empty stage. Keep 0 (inline): it is the only dispatch that ever completed
+  # ArmDTPlatform::configure on the iPadOS line, and the counters will finally
+  # report from a pass that actually runs (see the trust-cache switch below).
+  "r11-root-async=0",
+  # Security-extension kexts (zzz-skip-security-extensions.patch, 2026-11-02).
+  # With the match pass contained, the panel stopped at stage=mac_policy_initmach
+  # and "failed to get mix-n-match policy: 2": the boot thread is parked in the
+  # start() of a prelinked security-extension kext, and everything start() could
+  # wait on needs the machine timer, which is not up yet (IRQ=0), so the park
+  # never times out.
+  #
+  # Round 1 with "=1" (skip the whole pass) moved the stage on to trust_cache_init
+  # and then panic'd: "image4 interface not available @kern_trustcache.c:253".
+  # That runtime hard-requires img4if and amfi, which com.apple.security.AppleImage4
+  # and com.apple.driver.AppleMobileFileIntegrity register, so the whole-pass skip
+  # could never get further. The value is a bit mask read every boot:
+  #   0 stock, 1 whole pass, 2 com.apple.security.sandbox,
+  #   4 AMFI, 8 AppleImage4  (4 and 8 only ever produce the panic above)
+  # 2026-11-03: "=1" is usable now. zzz-trustcache-skip.patch makes both
+  # trust-cache entry points return early when img4if/amfi are missing, which is
+  # what stands between this and PE_lockdown_iokit (see kernel_bootstrap's order
+  # above). Don't set 1 without r11-tc-skip=1.
+  "r11-skip-security-extensions=1",
+  # Companion to the switch above (zzz-trustcache-skip.patch). Skipping the
+  # security extensions leaves img4if/amfi NULL; without this the boot dies in
+  # trust_cache_runtime_init()/load_static_trust_cache() before StartIOKitMatching()
+  # ever runs. Only acts when one of those globals is actually NULL, so it can
+  # stay set when the mask goes back to 0.
+  "r11-tc-skip=1",
   # offline-legacy-* and offline-* are read by the arch patch series; the values
   # below match the SDM660 platform (one GICv3, 4+4 CPU layout, no SEP).
   "offline-legacy-register=1",
@@ -142,20 +266,177 @@ kernel_args = [
   # xnu connects the persistent Data volume from the offline owner cache; the
   # APFS shared-datavolume path does not apply to that layout.
   "offline-key-events=1",
+  # Which image is this, really? The panel's top bar prints
+  # "[<tag>] UniXNU boot diagnostics ...". Until now a photograph could not be
+  # attributed to a build without inference -- the 2026-11-04 rerun had to be
+  # identified as "not irq9" from CNTV_CVAL sitting ~13 s in the past, because
+  # T=0x24 is unreachable once the SGI self-probe is compiled out. One tag turns
+  # that derivation into a glance, and costs nothing at run time.
+  #
+  # irq11: initCPU's diagnostic tail (0x22..0x27) is behind armcpu-init-diag=1,
+  # and neither the SGI self-probe nor armcpu_gic_snapshot() is on the boot path
+  # any more -- they are the only two readers of ICC_HPPIR0/1_EL1, and irq7
+  # (T=0x24) and irq10 (T=0x26) both stopped in exactly those two. The GIC's
+  # ISENABLER0 is narrowed to SGI 0 + PPI 27 at the source, so the old 0x27
+  # cleanup pass is gone with it. Device result: S=0x12 / T=0x2A -- initCPU() AND
+  # registerService() returned, ArmCpu::start() is done. The screen then showed
+  # the panel's own "120s observation limit" stop, so that image cannot say what
+  # the kernel did next.
+  #
+  # irq12: payload-only change on the same kernel. Continuous panel (no
+  # self-freeze) plus the timer call, so the next image can finally answer
+  # "does the boot leave PE_lockdown_iokit and does the clock drive bsd_init"
+  # instead of being parked by its own instrument.
+  # Device result: real kernel panic after ~143 s -- "Undefined kernel
+  # instruction: pc=0xfffffff004a80038 instr=0" from NativeAES::MetaClass::alloc()
+  # under bsd_init -> IOKitBSDInit -> doServiceMatch. See CONFIG_XNU_NATIVE_AES in
+  # configs/r11_defconfig: the AES base-class bindings point at a zero page.
+  #
+  # irq13: CONFIG_XNU_NATIVE_AES=n, so that personality is not published and IOKit
+  # never instantiates the class. Kernel-only change; boot-args unchanged.
+  # Device result: identical panic at pc=0xfffffff004a80038. The change never
+  # reached the compiler: the build reads out/<device>/<profile>/<config>/.config,
+  # which "unixnu defconfig r11_defconfig" generates from configs/r11_defconfig --
+  # editing the defconfig alone is not enough.
+  #
+  # irq14: same kernel meaning, this time after a real "unixnu defconfig" run, so
+  # .config carries CONFIG_XNU_NATIVE_AES=n last (the arch fragment sets =y
+  # earlier; the defconfig is applied after the fragments and last key wins).
+  # Adds the ArmCpu console audit (R11 GIC/GICR/TIMER) that reads back every
+  # register deciding PPI 27 delivery, without touching ICC_HPPIR* or the panel.
+  #
+  # irq15: identical, plus DAIF in the TIMER audit line. daif bit 7 is I; without
+  # it "GICR_ISPENDR0 bit 27 set but timer_irqs=0" cannot be split into "IRQs are
+  # masked here" and "the CPU interface never delivered".
+  # irq16: the audit numbers are also stored in ArmCpu globals and painted as one
+  # panel row (AUD ...) on row 45, repainted every tick. The console has no
+  # scrollback: boot-irq15's four R11 lines were printed inside ArmCpu::start()
+  # and pushed off the screen by the kext logs that follow, so they were never
+  # readable on a photograph. The panel row is the persistent copy.
+  #
+  # irq17: the timer's PPI number. The AUD row on irq16 read
+  #   pend=40200000 (bit30 asserted)  isen=8000001 (bit27 only)  daif=200 (I clear)
+  # i.e. the timer had been firing into an INTID nothing enabled. soc/dts/sdm660.dtsi
+  # lists the arch-timer PPIs as <1 13> <1 14> <1 11> <1 10> = INTIDs 29/30/27/26,
+  # and in the arm,armv8-timer order the second entry is the EL1 virtual timer --
+  # the one CNTV drives. ArmCpu now takes the INTID from the boot-arg instead of
+  # hardcoding Apple's 27.
+  # irq18: bsd_init no longer panics in IOKitBSDInit when no IOMedia matches --
+  # that panic ran before vfs_mountroot(), hiding the eMMC probe. With the new
+  # zzz-no-root-media-panic.patch the mount loop runs, qcom_emmc_rootdev() reports
+  # its verdict on the panel stage row, and the kernel stays alive.
+  # irq19: qcom_emmc.c keeps qcom_emmc_stage/err/blocks in globals and
+  # BootProgress paints them as the row-27 "EMMC st=.." line; vfs_subr.c returns
+  # ENXIO when the probe fails instead of letting bdevvp() panic on NODEV, so the
+  # kernel stays in bsd_init's mount-retry loop with the verdict on screen.
+  # irq20: qcom_emmc.c defines the panel's sirius_emmc_* globals for real (they
+  # were weak zero stubs, so the "EMMC step/ver/caps" row had never shown a
+  # measurement), fills them with the SDHCI identity registers read before any
+  # clock write, and sets step to the source line of the last checkpoint.
+  # irq21: same as irq20, but VERSION is read with hc_rd16. irq20 died in
+  # qcom_emmc_rootdev with "Unaligned kernel data abort" (esr=0x96000021,
+  # far=...0fe) because VERSION is a 16-bit register at 0xfe and was read 32-bit.
+  # irq22: a stuck SWRST_ALL no longer ends the probe (bounded 100 ms, then
+  # "emmc: sw reset skip"), and su.base_mhz reads CAPABILITIES[15:8] as 8 bits
+  # (caps=0x742dc8b2 -> 200 MHz, not 8), so the 400 kHz divider is right.
+  # irq23: emmc_clock_set() wrote CLOCK_CONTROL=0x0101 and so left bit 2 (SD clock)
+  # clear, turning off the clock the bootloader had running: CMD1 then timed out
+  # with no error bit. Now 0x0007 | divider, plus a 2 ms settle, and a failed
+  # command reports (ERR_INT_STATUS<<16)|INT_STATUS in the panel's h= field.
+  # irq24: 0x34/0x36 are the Normal/Error Interrupt STATUS enables, and both were
+  # zeroed (the macro called 0x36 "SIGNAL_ENABLE"), which prevents the status bits
+  # from being set at all: every poll timed out with h=0. Status enables are now on,
+  # signal enables off, and a failed command publishes PRESENT_STATE/POWER_CONTROL.
+  # irq25: emmc_wait_int() publishes ERR_INT_STATUS into h= before clearing it
+  # (irq24 returned EIO but h= read 0), and CMD0 is actually sent before the OCR
+  # loop -- the bootloader left the card in Transfer state, where CMD1 does not
+  # answer.
+  # irq26: emmc_cmd()'s failure block no longer overwrites the error code that
+  # emmc_wait_int() captured, and a stuck CMD inhibit (PRESENT_STATE bit0, still
+  # set before the first command) gets one targeted SWRST_CMD with a panel verdict.
+  # irq27: the command error status gets its own panel word (e=), written only on
+  # failure and never cleared, so the code survives to a photograph.
+  # irq28: CMD1 retries on a Command Timeout (e=0001) instead of aborting, which is
+  # how an eMMC still initialising is meant to be polled; SWRST_CMD between attempts.
+  # irq29: probe CMD1(args x2), CMD13, CMD2 and CMD9 and publish which answered as
+  # p= (bit0 CMD1a, bit1 CMD1b, bit2 CMD13, bit3 CMD2, bit4 CMD9).
+  # irq30: p=00 said the card answers nothing. The driver's vendor power-control
+  # offsets were the msm8916/8996 ones (0xdc/0xe0/0xe4); v5 hardware -- what the
+  # stock tree names -- uses 0x240/0x244/0x248, and the clock that leaves the pad is
+  # selected by CORE_VENDOR_SPEC (0x20c) bits[9:8], which this driver never wrote.
+  # Both fixed, with vspec read back on the panel.
+  # irq31: the vendor registers are offsets inside the HC block (sdhci-msm v5 uses
+  # host->ioaddr), not the 0x0c0c5000 range, which is the CQHCI engine and reads 0.
+  # irq30's vspec=0000 was reading CQE; the MCLK select now writes HC+0x20c.
+  # irq32: MCLK is confirmed selected (vspec=240a0e, bit[9:8]=2) and the card is
+  # still mute, so the PMIC power-control handshake is now read and acknowledged
+  # (pwrctl=) before CMD0, the way sdhci-msm's irq handler does.
+  # irq33: pwrctl=0001 said BUS_OFF, but that was sampled before the bus-power bit
+  # was set. The power request now happens first (3.3 V then 1.8 V), each event is
+  # acknowledged like sdhci-msm does, and pwrctl= shows the two status nibbles.
+  # irq34: the PMIC answered the 3.3 V bus-power request with BUS_ON and it was
+  # acknowledged, so power reacts. The bus was left at 1.8 V while vmmc is 2.95 V,
+  # so CMD1 is now tried at 3.3 V, 3.0 V and 1.8 V and the hit mask goes in pwrctl='.
+  # irq35: CORE_VENDOR_SPEC carried bit18 (CORE_HC_SELECT_IN_EN, the HS400 tuned
+  # sampling path) from the bootloader, which can swallow every response at the
+  # identification clock. It is now reset to the POR value 0xa9c, and the RESPONSE
+  # register is published as r= after a failed CMD1.
+  "sheng-build-tag=irq35",
+  # boot-irq11b.img was this list + this line on the irq11 kernel; from irq12 on
+  # it is part of the main line: the timer handler also calls rtclock_intr(0),
+  # because without it the first tick only counts and re-arms CNTV_CVAL, XNU's
+  # clock never advances, and dlil_init's msleep() waits forever.
+  "armcpu-timer-call=1",
+  # PPI 14 of the DT arch-timer node -> INTID 30 = EL1 virtual timer (CNTV).
+  # 27 stays available as an override should the AUD row contradict this.
+  "armcpu-timer-intid=30",
 ]
 
+# /chosen 与 /chosen/manifest-properties（AppleImage4 在 mac_policy_initmach 里读的东西）
+# ---------------------------------------------------------------------------
+# 现象：安全扩展 kext 的 start() 停在这里，串口/panic 里跟着
+#     failed to get mix-n-match policy: 2
+# 因为 devicetree.py 过去把 /chosen/manifest-properties 生成成一个**空节点**，
+# iBoot 正常会填的 dict 属性一个都没有（kErrorNotFound = 2）。
+#
+# 2026-11-03 只补「确定是布尔量」+ mix-n-match 策略这几项：img4 文档
+# (EXTERNAL_HEADERS/img4/runtime.h) 明确 AMNM/iuou/RSCH/EUOU/FPGT 是 boolean，
+# 而 DT 里的 boolean 是 4 字节 u32（bsd/kern/kern_csr.c 的 _csr_get_dt_bool 直接读
+# *(bool*)）。certificate-production-status / effective-*-ap 的类型没确认，先不写 ——
+# 写错尺寸会 panic "unexpected size %xu for bool property"。
+#
+# 两个节点都填：Image4 的取值路径没公开（kern_csr.c 里 iuos 读 manifest-properties，
+# internal-use-only-unit 读 /chosen），重复一份没有副作用。
+[adt.chosen.u32]
+"mix-n-match-prevention-status" = 0   # 0 = 未阻止 → 允许 mix-n-match（dev 融合的语义）
+"internal-use-only-unit" = 0
+"research-enabled" = 0
+"engineering-use-only-unit" = 0
+"factory-prerelease-global-trust" = 0
+
+[adt.manifest_properties.u32]
+"mix-n-match-prevention-status" = 0
+"internal-use-only-unit" = 0
+"research-enabled" = 0
+"engineering-use-only-unit" = 0
+"factory-prerelease-global-trust" = 0
+
 [payload.adt]
-# Platform identity is spoofed to the OS profile reference machine (iPad7,1);
-# it is unrelated to the physical SoC. The seed itself never enters the repo.
+# Platform identity is spoofed to the OS profile reference machine (iPhone X /
+# D22AP, from the ios-16.5-20F66 profile); it is unrelated to the physical SoC.
+# The seed itself never enters the repo.
 chip_id = "207"
 owned_memory_size = "0xC0000000"   # 3 GiB of the 3.98 GiB handoff, 2 MiB aligned
 unique_chip_id = "required"
 packed_data_ramdisk = false        # RAMDisk key: no NativeRamBlock driver yet
 persistent_data = true
-# root_match_volume_uuid stays unset until the userdata image exists: a wrong
-# UUID makes XNU fail to match the APFS root volume. After
-# "./unixnu build userdata" write the volume UUID back here, for example:
-# root_match_volume_uuid = "00000000-0000-0000-0000-000000000000"
+# APFS root volume of the iOS 16.5 (20F66) OS window, read off the extracted
+# 096-04088-077.dmg with "diskutil apfs list -plist" on 2026-11-05:
+#   name SydneyF20F66.D22D221OS, role System, 5255610368 bytes
+# The userdata image built from the same IPSW carries that disk image verbatim at
+# offset 0x100000, so the UUID inside it is this one. A wrong UUID makes XNU fail
+# to match the root volume, so it is recorded rather than guessed.
+root_match_volume_uuid = "97A3EB1A-5218-4936-BC85-9574EC2C8CC9"
 
 [bootimg.image]
 # Stock OTA boot.img header (inputs/hw.json boot_image): header_version 0,

@@ -7,21 +7,121 @@
 #
 # Keep the XnuPrelink patches here because dropping the OS series drops them too.
 zzz-boot-progress.patch
-component:XnuPrelink/patches/xnu-10063.141.1-security-init.patch
-component:XnuPrelink/patches/xnu-10063.141.1-sparse-index.patch
+# R11 eMMC root device: read-only SDHCI PIO block driver (bsd/dev/qcom_emmc.c)
+# + vfs_mountroot probe assigning rootdev. Same shape as rmx1971's
+# sweet-ufs-root.patch; see the patch header for the register map.
+qcom-emmc-root.patch
+# Let bsd_init reach vfs_mountroot instead of panicking in IOKitBSDInit.
+zzz-no-root-media-panic.patch
+# eMMC verdict globals + no bdevvp() panic when the probe fails.
+zzz-emmc-verdict.patch
+# Real sirius_emmc_* values: SDHCI identity registers + source-line checkpoints.
+zzz-emmc-regs.patch
+# Bounded SWRST_ALL wait + 8-bit CAPABILITIES base clock.
+zzz-emmc-cmd.patch
+# Enable the SD clock (bit 2) and record command failure status in h=.
+zzz-emmc-clk.patch
+# Enable SDHCI status enables (0x34/0x36) so polling can see completion/errors.
+zzz-emmc-irq.patch
+# Publish command error codes in h= and send CMD0 before the OCR loop.
+zzz-emmc-cmd0.patch
+# Keep the command error code in h=; targeted SWRST_CMD when CMD inhibit is stuck.
+zzz-emmc-inh.patch
+# qcom_emmc_lasterr: the command error status in its own word.
+zzz-emmc-lasterr.patch
+# CMD1 retries on a command timeout instead of ending the probe.
+zzz-emmc-retry.patch
+# Command probe matrix: which of CMD1/CMD13/CMD2/CMD9 the card answers.
+zzz-emmc-probe.patch
+# sdhci-msm v5 vendor offsets + default MCLK select in CORE_VENDOR_SPEC.
+zzz-emmc-v5.patch
+# Vendor registers are on the HC BAR, not the CQHCI range.
+zzz-emmc-hc.patch
+# Acknowledge the PMIC power-control handshake (pwrctl=).
+zzz-emmc-pwr.patch
+# Request bus power and complete the PMIC handshake before CMD0.
+zzz-emmc-pwron.patch
+# Probe CMD1 at 3.3 V, 3.0 V and 1.8 V bus voltage.
+zzz-emmc-volt.patch
+# Reset CORE_VENDOR_SPEC to its POR value (clears HS400 select-in) + publish RESPONSE.
+zzz-emmc-por.patch
+component:XnuPrelink/patches/xnu-8796.101.5-security-init.patch
+component:XnuPrelink/patches/xnu-8796.101.5-sparse-index.patch
 # Host-toolchain workaround, not a behaviour change: osfmk/ipc/mach_port.c
 # asserts on a const local, which is not an integer constant expression in C.
 # Xcode 15's clang folds it, Xcode 14's does not. See scripts/xnu-clang for the
 # other two arguments this host has to rewrite.
-zzzz-host-clang-static-assert.patch
+#
+# xnu-8796 (iOS 16.5) dropped both anchors: mach_port.c no longer asserts on a
+# const local, and the libkern/os/log.c XNUPOST address comparisons are gone, so
+# these two have nothing left to rewrite. The files stay on disk -- the host gap
+# is still real, and a 8796 build that trips on a static_assert of the same
+# shape gets fixed here.
+#zzzz-host-clang-static-assert.patch
 # Same class, same reason: libkern/os/log.c asserts that two macro aliases have
 # the same address, which Xcode 14's clang will not fold into a constant.
-zzzz-host-clang-xnupost-assert.patch
+#zzzz-host-clang-xnupost-assert.patch
 # Third host-toolchain gap, this one in iig rather than clang: the iig shipped
 # with older Xcodes emits an unguarded IORPCMessageFromMach() call into every
 # generated *.iig.cpp _Dispatch(), while iokit/DriverKit/IORPC.h (restored by
 # prepare-xnu-source.py from Apple's public source) declares it only for user
-# space. Adds the kernel-side prototype and points the reply helper at it.
+# space. Adds the kernel-side prototype to the generated file.
 # Not reachable from the DriverKit headers themselves: they are untracked in
 # .cache/xnu-work, so a device patch cannot touch them.
+# 8796 half: IOUserServer.cpp already defines IORPCMessageFromMach(msg, reply),
+# so the old "rename IORPCMessageFromMachReply and export it" hunk is gone and
+# only the iig Makefile injection remains.
 zzzz-host-iig-iorpc-export.patch
+# Match-pass trace for the PE_lockdown_iokit hard-freeze (2026-11-01): the
+# emmc1 kernel freezes with timer interrupts dead between the
+# "PE_lockdown_iokit" and "bsd_init enter" panel stages, i.e. inside
+# StartIOKitMatching's first match pass. These marks put every personality
+# match/probe/start plus the ArmDTPlatform checkpoints on the panel so the
+# spinning driver is visible in a photograph. boot-emmc1's only delta vs the
+# working boot-smp2 is the kernel binary itself (FD/DTB/ESP verified
+# identical, ADT differs only in random-seed), so a layout-sensitive latent
+# bug in the match path is the prime suspect.
+zzz-match-trace.patch
+# Root-match observation (2026-11-03): permanent counters for the FIRST match
+# pass. The panel history only keeps a few rows, so the root pass (the one that
+# decides whether ArmDTPlatform runs) is always overwritten by the later
+# IOResources/IOReportHub passes -- which is why every photograph since match3
+# shows "DT cfg=0" without saying whether findDrivers() returned nothing for
+# /device-tree or returned it and dropped the candidate. Diagnosis only; delete
+# together with zzz-match-trace.patch once the root pass is understood.
+zzz-match-observe.patch
+# Stage B of the same instrumentation, as its own file so the counter
+# definitions cannot be lost again by a prepare re-clone (the first version was
+# only in .cache/xnu-work and the link failed with "_r11_reg_enter, referenced
+# from _draw in libBootProgress.a"). Adds the registerService()/startMatching()/
+# doServiceMatch() counters that rows 2 and 3 paint. Applied immediately after
+# zzz-match-observe.patch because its line numbers assume that state.
+zzz-match-stage-b.patch
+# The stage after that: with the match pass contained, the 16.5 panel stopped at
+# mac_policy_initmach, inside the start() of a prelinked security-extension kext
+# (AMFI / "failed to get mix-n-match policy: 2"), on the boot thread. Skipping the
+# whole pass moved the stage to trust_cache_init and then panic'd on
+# "image4 interface not available", because trust_cache_runtime_init() needs the
+# img4if/amfi globals those kexts register -- so the switch is now a bit mask that
+# names one kext (see the patch header). Bisect tool, not a fix.
+zzz-skip-security-extensions.patch
+# The other half of that bisect (2026-11-03): with the pass skipped the boot
+# cannot get past trust_cache_init, and trust_cache_init sits BEFORE
+# PE_lockdown_iokit in kernel_bootstrap() (startup.c: 723 mac_policy_initmach,
+# 742 trust_cache_runtime_init, 777 PE_lockdown_iokit). That ordering is why
+# every image up to boot-rootreg1 painted all-zero ROOT/REG/SM/DSM rows: the
+# first match pass had not run yet, it was not skipped by registerService().
+# r11-tc-skip=1 makes both trust-cache entry points return early when
+# img4if/amfi are missing, so the boot can reach StartIOKitMatching() without
+# the security extensions. Guarded on those globals: mask=0 boots unchanged.
+zzz-trustcache-skip.patch
+# Second half of the same switch: KLDBootstrap's pass is not the only way the
+# security extensions start. Once the platform expert publishes the top level DT
+# nodes, IOService::registerService runs a synchronous match for each of them, and
+# /defaults matches AppleImage4 (IONameMatch "defaults", provider IOPlatformDevice).
+# Its start function stores into its own __DATA_CONST, which arm_vm_prot_finalize()
+# has already made read-only by then (machine_lockdown runs before PE_lockdown_iokit
+# in this port), so the store is a level-3 write permission fault in the kernel
+# static region. This patch applies the same mask inside OSKext::start(), which lets
+# matching walk past the security kexts and on to the /cpus nubs.
+zzz-skip-security-start.patch

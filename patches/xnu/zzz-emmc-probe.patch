@@ -1,0 +1,70 @@
+# R11: ask the eMMC several different questions and record which are answered.
+#
+# boot-irq27 gave the definitive error code (e=0001, Command Timeout) for CMD1, and
+# boot-irq28 retried it 64 times with a targeted SWRST_CMD in between: still no
+# answer, while CMD0 always completes because it needs no response. PRESENT_STATE
+# reports the card inserted and the CMD/DAT lines idle high, so the bus is wired and
+# pulled up.
+#
+# CMD1 is only valid while the card is in idle. The bootloader read boot.img from
+# this eMMC and hands over with the card in Transfer state, selected at some RCA;
+# there CMD1 is ignored (no response, Command Timeout) while CMD13/CMD9 for that RCA
+# do answer, and CMD0 should return it to idle. Which of those actually answer
+# separates "the card is not talking at all" from "the card is talking, in the wrong
+# state" -- so probe five commands in one boot and publish the answer bitmask as p=.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -63,6 +63,12 @@
+  *   0x0001..0x00ff = SDHCI ERR_INT_STATUS of the failed command
+  *   0xEEEE = the wait timed out with no error bit set at all */
+ volatile unsigned int qcom_emmc_lasterr;
++/* boot-irq29: bitmask of which probe commands were answered.
++ *   bit0 CMD1 arg 0x40ff8080   bit1 CMD1 arg 0   bit2 CMD13 RCA 1
++ *   bit3 CMD2  (send CID)      bit4 CMD9  RCA 1
++ * A card left in Transfer state by the bootloader answers CMD13/CMD9 and ignores
++ * CMD1, which is only valid in idle; a card that answers nothing is not talking. */
++volatile unsigned int qcom_emmc_probe;
+ #define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage = __LINE__; sirius_emmc_step = __LINE__; } while (0)
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -575,6 +581,40 @@
+ 	printf("R11 eMMC: cmd0 -> %d\n", error);
+ 	BP_STAGE(error ? "emmc: cmd0 err" : "emmc: cmd0 ok");
+ 
++	/*
++	 * CMD1 timed out 64 times in a row across boot-irq27/28 while CMD0 always
++	 * completes (it needs no response), so ask the card several different
++	 * questions and record which ones it answers. A card the bootloader left in
++	 * Transfer state ignores CMD1 -- that command is only valid in idle -- but
++	 * answers CMD13/CMD9 for the RCA it was left with, and that difference is the
++	 * whole diagnosis. Each failed command is followed by a targeted SWRST_CMD so a
++	 * stuck command line cannot poison the next probe.
++	 */
++	{
++		unsigned mask = 0;
++		uint32_t r[4];
++		const struct { unsigned idx; uint32_t arg; uint16_t flags; unsigned bit; } probe[] = {
++			{ 1,  0x40ff8080u, SDHCI_CMD_RESP_R48, 0x1 },
++			{ 1,  0x00000000u, SDHCI_CMD_RESP_R48, 0x2 },
++			{ 13, 0x00010000u, SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, 0x4 },
++			{ 2,  0x00000000u, SDHCI_CMD_RESP_R136 | SDHCI_CMD_CRC, 0x8 },
++			{ 9,  0x00010000u, SDHCI_CMD_RESP_R136 | SDHCI_CMD_CRC, 0x10 },
++		};
++		for (unsigned i = 0; i < sizeof(probe) / sizeof(probe[0]); i++) {
++			if (!emmc_cmd(probe[i].idx, probe[i].arg, probe[i].flags, r, NULL, 0)) {
++				mask |= probe[i].bit;
++				if (probe[i].bit == 0x1u) {
++					su.ocr = r[0];
++				}
++			} else {
++				hc_wr8(SDHCI_SOFTWARE_RESET, 0x02u);	/* SWRST_CMD */
++				delay(1000);
++			}
++		}
++		qcom_emmc_probe = mask;
++		BP_STAGE(mask ? "emmc: probe hit" : "emmc: probe none");
++	}
++
+ 	/* CMD1 until the card leaves busy. */
+ 	for (int i = 0; i < 64; i++) {
+ 		error = emmc_cmd(1, 0x40ff8080u, SDHCI_CMD_RESP_R48, resp, NULL, 0);

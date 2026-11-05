@@ -1,0 +1,129 @@
+# Hold the security extensions down at the IOKit side (2026-11-03).
+#
+# zzz-skip-security-extensions.patch only covers KLDBootstrap's pass, so the same
+# kexts are still started by ordinary IOKit matching. boot-tcskip1.img proved it:
+# the panel read "ADT in=1 why=1 pr=1 | passes=0" next to "SM a=25 r=0", and the
+# stack behind the panic was
+#
+#   ArmDTPlatform::configure -> IODTPlatformExpert::configure -> processTopLevel
+#     -> IOService::registerService -> startMatching -> doServiceMatch
+#     -> probeCandidates -> OSKext::load -> OSKext::start
+#     -> AppleImage4's kmod start function
+#     -> "Unexpected fault in kernel static region"
+#
+# AppleImage4's personality is IONameMatch "defaults" on IOPlatformDevice, and
+# the ADT has a /defaults node, so publishing the top level nodes matches it. Its
+# start function stores into its own __DATA_CONST (pc 0xfffffff0046e2d6c
+# "str x0,[x8,#0x220]", x8 = 0xfffffff005caa000 -> esr 0x9600004f, write,
+# permission fault level 3) and by then machine_lockdown() has run
+# arm_vm_prot_finalize(), so that page is read-only. Apple starts these kexts
+# before machine_lockdown; this port starts them after it, so the same store is
+# fatal here.
+#
+# This patch applies the same r11-skip-security-extensions mask inside
+# OSKext::start(), so matching can walk past them and on to the /cpus nubs, where
+# ArmCpu is: the GIC and the machine timer sit behind its start(), and IRQ=0 is
+# what parks every later stage.
+#
+# Bisect switch, not a working configuration: with a security extension skipped
+# nothing userland-side behaves normally. Delete together with the KLDBootstrap
+# half once the timer is up and the real ordering can be restored.
+--- a/libkern/c++/OSKext.cpp
++++ b/libkern/c++/OSKext.cpp
+@@ -8196,6 +8196,78 @@
+ 	OSKextLogKextInfo(kext, kext->getLoadTag(), 1, firehose_tracepoint_code_load);
+ }
+ 
++/*
++ * R11 bring-up: hold the security extensions down at the IOKit side too.
++ *
++ * zzz-skip-security-extensions.patch only covers KLDBootstrap::loadSecurityExtensions(),
++ * the pass that starts them before the MAC policy is locked. Skipping that pass is
++ * not enough: the same kexts also carry ordinary IOKit personalities, so the first
++ * match pass finds them anyway. On 2026-11-03 21:40 the boot got as far as
++ * publishing /defaults -- AppleImage4's personality is IONameMatch "defaults",
++ * provider IOPlatformDevice -- and IOPlatformExpert's top level registration ran
++ * a synchronous match that ended in OSKext::load -> OSKext::start ->
++ * AppleImage4's kmod start function, which writes two globals of its own
++ * __DATA_CONST. By then machine_lockdown() had already been through
++ * arm_vm_prot_finalize(), so that page is read-only and the store took
++ * "Unexpected fault in kernel static region", esr 0x9600004f (write, permission
++ * fault level 3), pc 0xfffffff0046e2d6c (str x0,[x8,#0x220], x8 = 0xfffffff005caa000).
++ *
++ * In Apple's boot order those kexts start before machine_lockdown(), which is why
++ * the same store is fine there. Rather than reorder the port around them, keep
++ * them from starting at all and let matching walk on to the CPU nubs; the point of
++ * this image is ArmCpu, and the GIC and the machine timer sit behind its start().
++ *
++ * Same bit mask as the KLDBootstrap switch, read on every call so one board.toml
++ * edit plus payload+bootimg is enough to change the answer:
++ *   0 stock, 1 every security extension, 2 sandbox, 4 AMFI, 8 AppleImage4
++ */
++extern "C" int PE_parse_boot_argn(const char *arg_string, void *arg_ptr, int max_len);
++
++static int
++r11_skip_security_mode(void)
++{
++	int value = 0;
++
++	if (!PE_parse_boot_argn("r11-skip-security-extensions",
++	    &value, sizeof(value))) {
++		return 0;
++	}
++	return value > 0 ? value : 0;
++}
++
++static bool
++r11_skip_security_start(OSKext *kext)
++{
++	int         mode;
++	const char *id;
++
++	if (kext == NULL ||
++	    kext->getPropertyForHostArch("AppleSecurityExtension") != kOSBooleanTrue) {
++		return false;
++	}
++	mode = r11_skip_security_mode();
++	if (!mode) {
++		return false;
++	}
++	if (mode == 1) {
++		return true;
++	}
++	id = kext->getIdentifierCString();
++	if (id == NULL) {
++		return false;
++	}
++	if ((mode & 2) && !strcmp(id, "com.apple.security.sandbox")) {
++		return true;
++	}
++	if ((mode & 4) && !strcmp(id, "com.apple.driver.AppleMobileFileIntegrity")) {
++		return true;
++	}
++	if ((mode & 8) && !strcmp(id, "com.apple.security.AppleImage4")) {
++		return true;
++	}
++	return false;
++}
++
+ /*********************************************************************
+ *********************************************************************/
+ OSReturn
+@@ -8288,7 +8360,16 @@
+ 	OSKextLogKextInfo(this, kmod_info->address, kmod_info->size, firehose_tracepoint_code_load);
+ 	result = OSRuntimeInitializeCPP(this);
+ 	if (result == KERN_SUCCESS) {
+-		result = startfunc(kmod_info, kmodStartData);
++		if (r11_skip_security_start(this)) {
++			OSKextLog(this,
++			    kOSKextLogErrorLevel |
++			    kOSKextLogLoadFlag,
++			    "R11: security extension %s start skipped (mode %d).",
++			    getIdentifierCString(), r11_skip_security_mode());
++			result = kOSKextReturnStartStopError;
++		} else {
++			result = startfunc(kmod_info, kmodStartData);
++		}
+ 	}
+ 
+ 	/* An explicitly linked security initializer must run with its real

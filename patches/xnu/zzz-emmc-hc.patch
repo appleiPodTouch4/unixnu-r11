@@ -1,0 +1,59 @@
+# R11: the SDHCI vendor registers live on the HC BAR, not on the CQHCI range.
+#
+# boot-irq30 added the v5 vendor offsets and the CORE_VENDOR_SPEC MCLK select, but
+# read and wrote them through the driver's core_* helpers, i.e. the second reg range
+# at 0x0c0c5000. On hardware that reports "qcom,sdhci-msm-v5" that range is the
+# CQHCI engine, which stays cold until CQE is initialised, so it reads 0 -- the
+# photographed "vspec=0000" was that, not a vendor register. The stock device tree
+# says as much: reg-names = "hc", "cqhci", "ice".
+#
+# sdhci-msm's v5 accessors are `host->ioaddr + offset` (only the old MCI variant
+# uses core_mem), so CORE_VENDOR_SPEC (0x20c) and CORE_PWRCTL_STATUS/MASK/CLEAR/CTL
+# (0x240/0x244/0x248/0x24c) are all offsets inside the HC block, exactly like the
+# SDHCI registers this driver already reads. Every vendor access is therefore moved
+# from core_* to hc_*, which also means the MCLK select finally lands on the register
+# that routes the card clock.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -125,6 +125,12 @@
+ 
+ /* QCom sdhci-msm-v5 vendor block. */
+ /*
++ * boot-irq31: all of these live on the HC BAR (0x0c0c4000), not on the second
++ * reg range. sdhci-msm's v5 read/write ops are `host->ioaddr + offset`, and only
++ * the old MCI variant uses core_mem; the second range (0x0c0c5000) is the CQHCI
++ * engine, which reads 0 until CQE is initialised -- boot-irq30's vspec=0000 was
++ * that, not a vendor register. So core_rd/core_wr below are replaced by hc_*.
++ *
+  * boot-irq30: these were 0xdc/0xe0/0xe4, the msm8916/8996 layout. On sdhci-msm v5
+  * hardware -- what "qcom,sdhci-msm-v5" in the stock device tree names -- the
+  * vendor block puts them at 0x240/0x248/0x244, and 0xe4 is not a power-control
+@@ -558,12 +564,12 @@
+ 	hc_wr16(0x3a, 0);			/* error signal enable */
+ 	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
+ 	hc_wr8(SDHCI_TIMEOUT_CONTROL, 0x0eu);
+-	core_wr(CORE_PWRCTL_MASK, 0xffffffffu);
+-	core_wr(CORE_PWRCTL_CLEAR, core_rd(CORE_PWRCTL_STATUS));
++	hc_wr(CORE_PWRCTL_MASK, 0xffffffffu);
++	hc_wr(CORE_PWRCTL_CLEAR, hc_rd(CORE_PWRCTL_STATUS));
+ 	BP_STAGE("emmc: sw reset ok");
+ 	printf("R11 eMMC: ver %04x caps %08x %08x pwrctl %08x\n",
+ 	    hc_rd16(SDHCI_HOST_VERSION), hc_rd(SDHCI_CAPABILITIES),
+-	    hc_rd(SDHCI_CAPABILITIES + 4), core_rd(CORE_PWRCTL_STATUS));
++	    hc_rd(SDHCI_CAPABILITIES + 4), hc_rd(CORE_PWRCTL_STATUS));
+ 
+ 	/* 400 kHz identification clock. */
+ 	emmc_clock_set(su.base_mhz ? su.base_mhz * 1000u / 800u : 124u);
+@@ -952,9 +958,9 @@
+ 	 * (the bootloader's HS400 calibration, if any) survive.
+ 	 */
+ 	{
+-		uint32_t vs = core_rd(CORE_VENDOR_SPEC);
+-		core_wr(CORE_VENDOR_SPEC, (vs & ~CORE_HC_MCLK_SEL_MASK) | CORE_HC_MCLK_SEL_DFLT);
+-		sirius_emmc_oprobe = core_rd(CORE_VENDOR_SPEC);
++		uint32_t vs = hc_rd(CORE_VENDOR_SPEC);
++		hc_wr(CORE_VENDOR_SPEC, (vs & ~CORE_HC_MCLK_SEL_MASK) | CORE_HC_MCLK_SEL_DFLT);
++		sirius_emmc_oprobe = hc_rd(CORE_VENDOR_SPEC);
+ 		BP_STAGE("emmc: mclk dflt");
+ 	}
+ 	error = emmc_clocks();

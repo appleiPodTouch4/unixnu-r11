@@ -1,0 +1,62 @@
+# R11: enable the SDHCI status registers instead of masking them.
+#
+# boot-irq22 enabled the SD clock and boot-irq23 therefore got past the clock and
+# still timed out on CMD1, with h=0: no command-complete status and no error status
+# either. That is not a dead card, it is a masked controller.
+#
+# SDHCI has four registers here and the driver's macro names only match the first:
+#   0x34 Normal Interrupt Status Enable   (SDHCI_INT_ENABLE)        -- was 0
+#   0x36 Error  Interrupt Status Enable   (SDHCI_SIGNAL_ENABLE)    -- was 0
+#   0x38 Normal Interrupt Signal Enable                            -- never written
+#   0x3a Error  Interrupt Signal Enable                            -- never written
+# A cleared status-enable bit prevents the corresponding status bit from being set
+# at all (SD Host Controller Simplified Spec, Normal/Error Interrupt Status Enable),
+# so with 0x34 and 0x36 zeroed emmc_wait_int() could only ever time out, and
+# emmc_wait_int()'s error branch could never fire.
+#
+# This patch turns the two STATUS enables on (command complete, buffer ready,
+# transfer complete, error aggregate, and all error bits) and explicitly leaves the
+# two SIGNAL enables off, because this driver polls and never wants a CPU interrupt.
+# It also publishes PRESENT_STATE and POWER_CONTROL at the moment a command fails,
+# so the next photograph says whether the command was even taken.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -343,6 +343,10 @@
+ 		 * bit without another cycle. */
+ 		sirius_emmc_halts = ((uint32_t)hc_rd16(SDHCI_ERR_INT_STATUS) << 16) |
+ 		    hc_rd16(SDHCI_INT_STATUS);
++		/* Also publish the controller state at the failure, which says whether
++		 * the command was ever taken (CMD inhibit) and what the card lines do. */
++		sirius_emmc_state = hc_rd(SDHCI_PRESENT_STATE);
++		sirius_emmc_power = hc_rd8(0x29);
+ 		return error;
+ 	}
+ 	if (resp && (flags & 0x03) != SDHCI_CMD_RESP_NONE) {
+@@ -490,8 +494,25 @@
+ 			}
+ 		}
+ 	}
+-	hc_wr16(SDHCI_INT_ENABLE, 0);
+-	hc_wr16(SDHCI_SIGNAL_ENABLE, 0);
++	/*
++	 * boot-irq23 got past the SD clock and still timed out on CMD1 with h=0, i.e.
++	 * no command-complete bit and no error bit either. The cause is here: the
++	 * status-enable registers gate whether a status bit is SET at all (SD Host
++	 * Controller spec, Normal/Error Interrupt Status Enable), and both were
++	 * written as 0. The macro names also lie about the map:
++	 *   0x34 Normal Interrupt Status Enable   (SDHCI_INT_ENABLE)
++	 *   0x36 Error  Interrupt Status Enable   ("SDHCI_SIGNAL_ENABLE")
++	 *   0x38 Normal Interrupt Signal Enable
++	 *   0x3a Error  Interrupt Signal Enable
++	 * so 0x36 was the error STATUS enable and zeroing it silenced every error
++	 * bit. Poll with the status enables on and the signal enables off: this
++	 * driver never takes a CPU interrupt.
++	 */
++	hc_wr16(SDHCI_INT_ENABLE, SDHCI_INT_CMD_COMPLETE | SDHCI_INT_TX_COMPLETE |
++	    SDHCI_INT_BUF_RDY | SDHCI_INT_ERROR);
++	hc_wr16(SDHCI_SIGNAL_ENABLE, 0xffffu);	/* 0x36: error status enable */
++	hc_wr16(0x38, 0);			/* normal signal enable: polling only */
++	hc_wr16(0x3a, 0);			/* error signal enable */
+ 	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
+ 	hc_wr8(SDHCI_TIMEOUT_CONTROL, 0x0eu);
+ 	core_wr(CORE_PWRCTL_MASK, 0xffffffffu);

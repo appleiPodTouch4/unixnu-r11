@@ -1,0 +1,40 @@
+# R11: retry CMD1 on a command timeout instead of aborting the probe.
+#
+# boot-irq27 finally produced an unambiguous code: after CMD0 completed (it needs no
+# response, so it always does), CMD1 returned e=0001 -- Command Timeout -- with
+# PRESENT_STATE showing CMD inhibit set again, i.e. the command was issued and the
+# controller gave up waiting.
+#
+# An eMMC that is still initialising answers CMD1 late or not at all for up to about
+# a second, while the SDHCI command timeout is a few hundred microseconds at the
+# timeout clock this controller reports. Polling CMD1 and tolerating timeouts is
+# exactly how the card is meant to be brought up, but the loop returned on the first
+# error and only retried when the card had answered with busy=1. A timeout now
+# retries, with a targeted SWRST_CMD between attempts so a stuck command line cannot
+# make every later attempt fail for a different reason.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -579,8 +579,21 @@
+ 	for (int i = 0; i < 64; i++) {
+ 		error = emmc_cmd(1, 0x40ff8080u, SDHCI_CMD_RESP_R48, resp, NULL, 0);
+ 		if (error) {
+-			BP_STAGE("emmc: CMD1 failed");
+-			return error;
++			/*
++			 * boot-irq27: CMD0 completed (it needs no response) and CMD1 came
++			 * back with e=0001, Command Timeout, which is the expected first
++			 * answer from an eMMC that is still initialising: the controller's
++			 * own command timeout is far shorter than the ~1 s the card may
++			 * take. Retry like the busy case instead of aborting the whole
++			 * probe on the first miss, and clear a stuck command line between
++			 * attempts so the next one can be issued at all.
++			 */
++			if (i == 0) {
++				BP_STAGE("emmc: cmd1 timeout, retry");
++			}
++			hc_wr8(SDHCI_SOFTWARE_RESET, 0x02u);	/* SWRST_CMD */
++			delay(10000);
++			continue;
+ 		}
+ 		if (resp[0] & 0x80000000u) {
+ 			su.ocr = resp[0];

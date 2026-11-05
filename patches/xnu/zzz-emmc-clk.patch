@@ -1,0 +1,52 @@
+# R11: enable the SD clock, and record why a command failed.
+#
+# boot-irq21/22 established that the SDCC block is alive (VERSION/CAPABILITIES/
+# PRESENT_STATE all read sane, internal clock stable, card inserted) and that the
+# only blocker was the command path: emmc_wait_int() timed out waiting for
+# CMD_COMPLETE with no error bit set.
+#
+# The cause is in emmc_clock_set(): after programming the divider it wrote
+# CLOCK_CONTROL = 0x0101 | (div << 8), which leaves bit 2 (SD clock enable) clear.
+# The bootloader leaves that register at 0x0007 -- clock to the card running -- and
+# the driver's first clock write turned it off, so no command could ever complete.
+# A card with no SD clock looks exactly like a card that does not answer.
+#
+# Both changes are in qcom_emmc.c:
+#  1. CLOCK_CONTROL is written as 0x0007 | (div << 8) and followed by the 2 ms the
+#     spec asks for before the first command;
+#  2. a failed command stores (ERR_INT_STATUS << 16) | INT_STATUS in
+#     sirius_emmc_halts, which the panel already prints as h=, so a timeout and a
+#     real error bit are distinguishable from a photograph.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -251,7 +251,17 @@
+ 			return;
+ 		}
+ 	}
+-	hc_wr16(SDHCI_CLOCK_CONTROL, 0x0101u | (uint16_t)(div_field << 8));
++	/*
++	 * Enable the SD clock (bit 2) together with the internal clock. The previous
++	 * write here was 0x0101, which leaves bit 2 clear: the bootloader had left
++	 * clock control at 0x0007 (SD clock on) and the driver's first write turned
++	 * the card clock off, so every command waited for a completion that could
++	 * never arrive -- boot-irq22 reached "emmc: CMD1 failed" with a pure timeout
++	 * and no error bit set. Bits 1 and 2 are read-only/enable; writing them back
++	 * as 1 is harmless once the internal clock is stable.
++	 */
++	hc_wr16(SDHCI_CLOCK_CONTROL, 0x0007u | (uint16_t)(div_field << 8));
++	delay(2000);	/* 2 ms: the spec asks for this before the first command */
+ 	su.clock_div = div_field;
+ }
+ 
+@@ -328,6 +338,11 @@
+ 
+ 	error = emmc_wait_int(SDHCI_INT_CMD_COMPLETE, deadline, 1);
+ 	if (error) {
++		/* Panel h= shows (error status << 16) | interrupt status for the last
++		 * failed command, so a photograph separates a timeout from a real error
++		 * bit without another cycle. */
++		sirius_emmc_halts = ((uint32_t)hc_rd16(SDHCI_ERR_INT_STATUS) << 16) |
++		    hc_rd16(SDHCI_INT_STATUS);
+ 		return error;
+ 	}
+ 	if (resp && (flags & 0x03) != SDHCI_CMD_RESP_NONE) {

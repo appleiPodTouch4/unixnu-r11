@@ -1,0 +1,55 @@
+# R11: capture the command error code, and send the CMD0 the comment promised.
+#
+# boot-irq24 finally produced a real error return (err=5, EIO) instead of a bare
+# timeout: the status enables work and the controller is reporting an error for
+# CMD1. Two things were still missing:
+#  1. the error code never reached the panel -- emmc_wait_int() reads and clears
+#     ERR_INT_STATUS before returning, and the copy into sirius_emmc_halts happened
+#     afterwards, so h= read 0. The value is now published before the clear, and a
+#     pure timeout publishes 0xdead0000 | INT_STATUS so the two are distinguishable;
+#  2. emmc_device_init()'s own comment says "CMD0, then CMD1 until the card leaves
+#     busy" but only CMD1 was ever issued. The bootloader used this eMMC to read the
+#     payload and left it in Transfer state with a partition selected, where CMD1
+#     does not answer. CMD0 (GO_IDLE_STATE) is now sent first, best effort: a card
+#     that is already idle answers it with an error, and that must not stop the
+#     OCR loop.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -291,12 +291,16 @@
+ 	while (!(hc_rd16(SDHCI_INT_STATUS) & bit)) {
+ 		if (hc_rd16(SDHCI_INT_STATUS) & SDHCI_INT_ERROR) {
+ 			uint16_t err = hc_rd16(SDHCI_ERR_INT_STATUS);
++			/* Publish before clearing: boot-irq24 returned EIO but the panel read
++			 * h=0 because the status had already been written back. */
++			sirius_emmc_halts = ((uint32_t)err << 16) | hc_rd16(SDHCI_INT_STATUS);
+ 			hc_wr16(SDHCI_ERR_INT_STATUS, err);
+ 			hc_wr16(SDHCI_INT_STATUS, SDHCI_INT_ERROR);
+ 			printf("R11 eMMC: int error %04x waiting for %04x\n", err, bit);
+ 			return EIO;
+ 		}
+ 		if (!wait_deadline(deadline)) {
++			sirius_emmc_halts = 0xdead0000u | hc_rd16(SDHCI_INT_STATUS);
+ 			printf("R11 eMMC: timeout waiting for int %04x\n", bit);
+ 			return ETIMEDOUT;
+ 		}
+@@ -529,7 +533,19 @@
+ 	/* Power: 1.8 V signalling, bus on. QCom v5 may ignore this. */
+ 	hc_wr8(SDHCI_HOST_CONTROL + 1, 0x0bu);
+ 
+-	/* CMD0, then CMD1 until the card leaves busy. */
++	/*
++	 * boot-irq24's CMD1 came back with a real error bit and CMD-inhibit still set.
++	 * The bootloader used this card to read the payload and left it in Transfer
++	 * state with a partition selected, where CMD1 does not answer; the comment
++	 * below always said "CMD0, then CMD1" but no CMD0 was ever issued. Send it
++	 * now -- best effort, because a card already in idle answers CMD0 with an
++	 * error too and that must not stop the OCR loop.
++	 */
++	error = emmc_cmd(0, 0, SDHCI_CMD_RESP_NONE, NULL, NULL, 0);
++	printf("R11 eMMC: cmd0 -> %d\n", error);
++	BP_STAGE(error ? "emmc: cmd0 err" : "emmc: cmd0 ok");
++
++	/* CMD1 until the card leaves busy. */
+ 	for (int i = 0; i < 64; i++) {
+ 		error = emmc_cmd(1, 0x40ff8080u, SDHCI_CMD_RESP_R48, resp, NULL, 0);
+ 		if (error) {

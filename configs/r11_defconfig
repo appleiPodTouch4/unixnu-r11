@@ -5,7 +5,19 @@ CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_SOURCE_MOCKFS=y
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
-CONFIG_XNU_NATIVE_AES=y
+# Off since boot-irq13. NativeAES subclasses IOAESAccelerator, and
+# scripts/data/native-aes-original-bindings.S binds the base-class methods to
+# absolute addresses (0xfffffff004a80038 .. 0xfffffff004a814e0) recorded from a
+# different prelink layout. In this board's kernel.macho that offset is inside
+# __PLK_TEXT_EXEC but the bytes are zero, so the first service match that
+# instantiates NativeAES jumps into a zero page: boot-irq12 died with
+# "Undefined kernel instruction: pc=0xfffffff004a80038 instr=0" from
+# NativeAES::MetaClass::alloc() inside bsd_init -> IOKitBSDInit -> doServiceMatch.
+# With CONFIG_XNU_NATIVE_AES=n the personality is not published, IOKit finds no
+# such class and the rest of bsd_init runs. Re-enable only after the bindings are
+# re-audited against this image (the correct fix), which needs the AES kext's
+# code to actually be present at whatever address the audit records.
+CONFIG_XNU_NATIVE_AES=n
 CONFIG_XNU_NATIVE_ARCH_TIMER=y
 # The R11 has no native PAN implementation in the payload yet.
 CONFIG_XNU_NATIVE_PAN=n
@@ -15,12 +27,21 @@ CONFIG_XNU_NATIVE_UFS=n
 CONFIG_XNU_NATIVE_RAM_BLOCK=n
 CONFIG_XNU_NATIVE_LEGACY_DISPLAY=n
 CONFIG_XNU_NATIVE_MOBILE_DISPLAY=n
-# Needs build/boot-progress/libBootProgress.a, which this board does not ship
-# yet (sheng's BootProgress.c is 83 KB of its own display code). Off until the
-# board provides an implementation.
-CONFIG_XNU_BOOT_PROGRESS=n
+# The board ships the boot progress kit now (package/BootProgress.c + generated
+# BootProgressStubs.c, built by scripts/build-boot-progress.py into
+# build/boot-progress/libBootProgress.a): the panel paints the live kernel log
+# over the GOP framebuffer, which is the only way to read the silent stretch
+# between the MMU handoff and the first console output.
+CONFIG_XNU_BOOT_PROGRESS=y
 CONFIG_XNU_DT_PANIC_REGION=y
-CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE=y
+# Off for the xnu-8796 (iOS 16.5) target: the probe calls
+# zone_id_require_aligned(), which 8796 replaced with
+# zone_id_require(zid, esize, addr) plus the soft zone_owns(). There is no
+# direct equivalent for a PGZ alias -- the alias lives in the PGZ map, not the
+# zone map, so from_zone_map() answers a different question. The probe is a
+# boot-arg-gated diagnostic ("offline-zone-pgz-case=N"), so nothing boots
+# differently without it; port it onto the 8796 validators before re-enabling.
+CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE=n
 # The owner mount chain is gated: DATA_MOUNT needs BOOT_MANIFEST, which needs
 # CACHE_STARTUP, which needs CACHE_MOUNT, which needs ROOT_TRUST, which needs
 # ROOT_AUDIT, which needs VERIFIED_ROOT_PROBE -- and that last one needs the

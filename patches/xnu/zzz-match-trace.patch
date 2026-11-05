@@ -1,0 +1,601 @@
+# The IOService.cpp hunks are regenerated against xnu-8796.121.2 (iOS 16.5).
+# startMatching() grew an IOServiceDextRequirePowerForMatching assertion and a
+# releaseAssertion assignment on the startJob() path, so the trace marks no
+# longer land on the old context and the section was re-diffed instead of
+# shifted. The other three files still apply unchanged.
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+index 7a32a23..632e04d 100644
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -1581,14 +1581,34 @@ IODTPlatformExpert::probe( IOService * provider,
+ 	return this;
+ }
+ 
++extern "C" void boot_progress_stage(const char *text) __attribute__((weak));
++
++// Named breadcrumb for the platform-tree publication path. The panel keeps only
++// a handful of stage rows, so every entry carries the DT node it is about.
++static void
++bp_dt( const char * tag, IORegistryEntry * entry )
++{
++	char    buf[80];
++
++	if (!boot_progress_stage) {
++		return;
++	}
++	snprintf(buf, sizeof(buf), "%s %.44s", tag,
++	    (entry && entry->getName()) ? entry->getName() : "?");
++	boot_progress_stage(buf);
++}
++
+ bool
+ IODTPlatformExpert::configure( IOService * provider )
+ {
++	bp_dt("dc in", provider);
+ 	if (!super::configure( provider)) {
+ 		return false;
+ 	}
++	bp_dt("dc sup", provider);
+ 
+ 	processTopLevel( provider );
++	bp_dt("dc out", provider);
+ 
+ 	return true;
+ }
+@@ -1624,6 +1644,7 @@ IODTPlatformExpert::createNubs( IOService * parent, OSIterator * iter )
+ 			}
+ 
+ 			nub->attach( parent );
++			bp_dt( "nb", next );
+ #if !defined(__x86_64__)
+ 			OSData *tmpData = (OSData *)next->getProperty("device_type");
+ 			if (tmpData == NULL) {
+@@ -1664,6 +1685,7 @@ IODTPlatformExpert::createNubs( IOService * parent, OSIterator * iter )
+ 			assert(logical_id_added_to_ioreg == true);
+ #endif
+ 			nub->registerService();
++			bp_dt( "nb ok", next );
+ 		}
+ 		OSSafeReleaseNULL(nub);
+ 		iter->release();
+@@ -1680,6 +1702,7 @@ IODTPlatformExpert::processTopLevel( IORegistryEntry * rootEntry )
+ 	IORegistryEntry *   cpus;
+ 
+ 	// infanticide
++	bp_dt( "ptl in", rootEntry);
+ 	kids = IODTFindMatchingEntries( rootEntry, 0, deleteList());
+ 	if (kids) {
+ 		while ((next = (IORegistryEntry *)kids->getNextObject())) {
+@@ -1687,20 +1710,28 @@ IODTPlatformExpert::processTopLevel( IORegistryEntry * rootEntry )
+ 		}
+ 		kids->release();
+ 	}
++	bp_dt( "ptl inf", rootEntry);
+ 
++	// publishNVRAM() registers the NVRAM service, which itself starts a matching
++	// round. The two markers below separate that round from the nub publication.
++	bp_dt( "ptl nv", rootEntry);
+ 	publishNVRAM();
++	bp_dt( "ptl nvok", rootEntry);
+ 	assert(gIOOptionsEntry != NULL); // subclasses that do their own NVRAM initialization shouldn't be calling this
+ 	dtNVRAM = gIOOptionsEntry;
+ 
+ 	// Publish the cpus.
+ 	cpus = rootEntry->childFromPath( "cpus", gIODTPlane);
++	bp_dt( "ptl cpus", cpus);
+ 	if (cpus) {
+ 		createNubs( this, IODTFindMatchingEntries( cpus, kIODTExclusive, NULL));
+ 		cpus->release();
+ 	}
+ 
+ 	// publish top level, minus excludeList
++	bp_dt( "ptl top", rootEntry);
+ 	createNubs( this, IODTFindMatchingEntries( rootEntry, kIODTExclusive, excludeList()));
++	bp_dt( "ptl done", rootEntry);
+ }
+ 
+ IOReturn
+@@ -2053,6 +2084,8 @@ IOPlatformExpertDevice::init(void *dtRoot)
+ 	return true;
+ }
+ 
++extern "C" void boot_progress_stage(const char *text) __attribute__((weak));
++
+ bool
+ IOPlatformExpertDevice::startIOServiceMatching(void)
+ {
+@@ -2060,8 +2093,17 @@ IOPlatformExpertDevice::startIOServiceMatching(void)
+ 	if (!workLoop) {
+ 		return false;
+ 	}
++	if (boot_progress_stage) boot_progress_stage("root: workloop ok");
+ 
+-	registerService();
++	/*
++	 * R11: stock XNU hands this first match pass to the config thread
++	 * (_IOConfigThread), i.e. it runs behind the boot thread. This port has no
++	 * timer interrupt yet, so a pass that blocks on a cross-thread wait can
++	 * never be observed or woken. Run the pass inline on the boot thread where
++	 * the boot-progress marks name the exact step it stops on.
++	 */
++	registerService(kIOServiceSynchronous);
++	if (boot_progress_stage) boot_progress_stage("root: registerService done");
+ 
+ 	return true;
+ }
+diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -112,6 +112,83 @@
+ 
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
++// R11 boot diagnostics: surface the match pass stage by stage on the
++// boot-progress panel. Weak: the bootstrap pass links without the kit.
++extern "C" void boot_progress_stage(const char *text) __attribute__((weak));
++extern "C" int PE_parse_boot_argn(const char *arg_string, void *arg_ptr, int max_len);
++
++static void bp_name(const char *tag, const char *name)
++{
++	if (!boot_progress_stage) {
++		return;
++	}
++	char b[64];
++	snprintf(b, sizeof(b), "%s %.34s", tag, name ? name : "?");
++	boot_progress_stage(b);
++}
++
++// R11: the synchronous path in registerService() ends in assert_wait() +
++// thread_block() waiting for the busy count to drain. That wakeup needs the
++// machine timer, and the timer interrupt only exists once ArmCpu has been
++// probed - which is itself blocked behind this match pass. Until the GIC is
++// up, any block here is permanent. r11-match-nowait=1 declines the wait so
++// the pass can return and startup moves on to bsd_init / ArmCpu probe.
++static int r11_match_nowait(void)
++{
++	static int cached = -1;
++	int v = 0;
++
++	if (cached < 0) {
++		cached = 0;
++		if (PE_parse_boot_argn("r11-match-nowait", &v, sizeof(v))) {
++			cached = (v != 0);
++		}
++	}
++	return cached;
++}
++
++static void bp_match_mark(const char *what, const char *name)
++{
++	bp_name(what, name);
++}
++
++// Exclave drivers have no hardware on SDM660; their personalities still show
++// up in the candidate set and can send the match pass into a retry storm.
++static bool r11_skip_exclave(void)
++{
++	static int r11_cached = -1;
++	if (r11_cached < 0) {
++		int r11_v = 0;
++		PE_parse_boot_argn("r11-skip-exclave", &r11_v, sizeof(r11_v));
++		r11_cached = r11_v;
++	}
++	return r11_cached != 0;
++}
++
++static bool r11_is_exclave_class(const char *cls)
++{
++	if (!cls) {
++		return false;
++	}
++	return !strncmp(cls, "IOExclaveProxy", 14)
++	    || !strncmp(cls, "AppleARMLightEmUp", 17)
++	    || !strncmp(cls, "AppleARMFabricTrace", 19);
++}
++
++// Escape hatch: doServiceMatch restarts its whole pass when the service asks for
++// a re-match during that pass, which on this port can spin forever. Default 0
++// keeps stock behaviour; a positive r11-match-maxpass bounds the rounds.
++static unsigned r11_maxpass(void)
++{
++	static int r11_cached = -1;
++	if (r11_cached < 0) {
++		int r11_v = 0;
++		PE_parse_boot_argn("r11-match-maxpass", &r11_v, sizeof(r11_v));
++		r11_cached = r11_v > 0 ? r11_v : 0;
++	}
++	return (unsigned)r11_cached;
++}
++
+ static IOPlatformExpert *       gIOPlatform;
+ static class IOPMrootDomain *   gIOPMRootDomain;
+ const IORegistryPlane *         gIOServicePlane;
+@@ -1121,21 +1198,28 @@
+ 
+ 	unlockForArbitration();
+ 
++	bp_name(sync ? "sm syn" : "sm asy", getName());
+ 	if (needConfig) {
+ 		if (needWake) {
+ 			IOLockLock( gIOServiceBusyLock );
+ 			thread_wakeup((event_t) this /*&__state[1]*/ );
+ 			IOLockUnlock( gIOServiceBusyLock );
+ 		} else if (!sync || (kIOServiceAsynchronous & options)) {
++			bp_name("sm job", getName());
+ 			// assertion will be released when matching job is complete
+ 			releaseAssertion = false;
+ 			_IOServiceJob::startJob( this, kMatchNubJob, options );
++			bp_name("sm job queued", getName());
+ 		} else {
+ 			do {
++				bp_name("sm loop", getName());
+ 				if ((__state[1] & kIOServiceNeedConfigState)) {
++					bp_name("sm inline", getName());
+ 					doServiceMatch( options );
++					bp_name("sm inline ret", getName());
+ 				}
+ 
++				bp_name("sm loop-lock", getName());
+ 				lockForArbitration();
+ 				IOLockLock( gIOServiceBusyLock );
+ 
+@@ -1150,15 +1234,25 @@
+ 
+ 				unlockForArbitration();
+ 
++				// No timer interrupt yet: a block here never wakes. Decline the
++				// wait so the pass returns and the rest of startup can run.
++				if (waitAgain && r11_match_nowait()) {
++					bp_name("sm nowait", getName());
++					waitAgain = false;
++				}
++
+ 				if (waitAgain) {
+ 					assert_wait((event_t) this /*&__state[1]*/, THREAD_UNINT);
+ 				}
+ 
+ 				IOLockUnlock( gIOServiceBusyLock );
+ 				if (waitAgain) {
++					bp_name("sm wait", getName());
+ 					thread_block(THREAD_CONTINUE_NULL);
++					bp_name("sm woke", getName());
+ 				}
+ 			} while (waitAgain);
++			bp_name("sm done", getName());
+ 		}
+ 	}
+ 
+@@ -3841,6 +3935,14 @@
+ 	dextCount = 0;
+ 
+ 	assert( matches );
++	{
++		char r11_b[40];
++		snprintf(r11_b, sizeof(r11_b), "cands %u", (unsigned)matches->getCount());
++		if (boot_progress_stage) {
++			boot_progress_stage(r11_b);
++		}
++	}
++	unsigned r11_cand = 0;
+ 	while (!needReloc
+ 	    && (nextMatch = matches->getFirstObject())) {
+ 		nextMatch->retain();
+@@ -3859,6 +3961,29 @@
+ 			continue;
+ 		}
+ 
++		const char *r11_cls = NULL;
++		{
++			OSString *r11_cs = OSDynamicCast(OSString, match->getObject(gIOClassKey));
++			if (r11_cs) {
++				r11_cls = r11_cs->getCStringNoCopy();
++			}
++		}
++		r11_cand++;
++		{
++			char r11_b[64];
++			snprintf(r11_b, sizeof(r11_b), "cand %u %.28s", r11_cand,
++			    r11_cls ? r11_cls : "?");
++			if (boot_progress_stage) {
++				boot_progress_stage(r11_b);
++			}
++		}
++		if (r11_skip_exclave() && r11_is_exclave_class(r11_cls)) {
++			bp_name("skp", r11_cls);
++			nextMatch->release();
++			nextMatch = NULL;
++			continue;
++		}
++
+ 		props = NULL;
+ #if IOMATCHDEBUG
+ 		debugFlags = getDebugFlags( match );
+@@ -3867,14 +3992,17 @@
+ 		bool newIsBoot = false;
+ 		bool existingIsBoot = false;
+ 		bool isReplacementCandidate = false;
++		const char *r11_why = "ok";
+ 
+ 		do {
+ 			client = NULL;
+ 			isDext = (NULL != match->getObject(gIOUserServerNameKey));
+ 			if (isDext && !(kIODKEnable & gIODKDebug)) {
++				r11_why = "dext-off";
+ 				continue;
+ 			}
+ 			if (isDext && !gIODextRelaunchMax && rematchCountProp) {
++				r11_why = "dext-rem";
+ 				continue;
+ 			}
+ 			newIsBoot = gIOCatalogue->personalityIsBoot(match);
+@@ -3897,6 +4025,7 @@
+ 				existingIsBoot = client->propertyExists(gIOMatchedAtBootKey);
+ 				isReplacementCandidate = existingIsBoot && !newIsBoot;
+ 				if (!isDext && !isReplacementCandidate) {
++					r11_why = "cat-held";
+ 					break;
+ 				}
+ 			}
+@@ -3904,17 +4033,22 @@
+ 			// create a copy now in case its modified during matching
+ 			props = OSDictionary::withDictionary(match, match->getCount());
+ 			if (NULL == props) {
++				r11_why = "nomem";
+ 				break;
+ 			}
+ 			props->setCapacityIncrement(1);
+ 
+ 			// check the nub matches
++			bp_match_mark("mp", r11_cls);
+ 			if (false == matchPassive(props, kIOServiceChangesOK | kIOServiceClassDone)) {
++				r11_why = "no-match";
+ 				break;
+ 			}
++			bp_match_mark("mp-ok", r11_cls);
+ 			if (isReplacementCandidate) {
+ 				if (canTerminateForReplacement(client)) {
+ 					client->terminate(kIOServiceTerminateNeedWillTerminate | kIOServiceTerminateWithRematch);
++					r11_why = "repl";
+ 					break;
+ 				}
+ 			}
+@@ -3924,6 +4058,7 @@
+ 					dextCount++;
+ 				}
+ 				if (categoryConsumed) {
++					r11_why = "dext-cat";
+ 					break;
+ 				}
+ 			}
+@@ -3933,12 +4068,15 @@
+ 					personalityMatch = !personalityMatch;
+ 				}
+ 				if (!personalityMatch) {
++					r11_why = "rematch";
+ 					break;
+ 				}
+ 			}
+ 
+ 			// Check to see if driver reloc has been loaded.
++			bp_match_mark("mod", r11_cls);
+ 			needReloc = (false == gIOCatalogue->isModuleLoaded( match, &kextRef ));
++			bp_match_mark(needReloc ? "mod-no" : "mod-ok", r11_cls);
+ 			if (needReloc) {
+ #if IOMATCHDEBUG
+ 				if (debugFlags & kIOLogCatalogue) {
+@@ -3947,6 +4085,7 @@
+ #endif
+ 				// If reloc hasn't been loaded, exit;
+ 				// reprobing will occur after reloc has been loaded.
++				r11_why = "no-module";
+ 				break;
+ 			}
+ 			if (kextRef) {
+@@ -3975,6 +4114,7 @@
+ 			}
+ 		} while (false);
+ 
++		bp_name(r11_why, r11_cls);
+ 		OSSafeReleaseNULL(client);
+ 		OSSafeReleaseNULL(nextMatch);
+ 		OSSafeReleaseNULL(props);
+@@ -3982,6 +4122,15 @@
+ 	OSSafeReleaseNULL(matches);
+ 	OSSafeReleaseNULL(rematchCountProp);
+ 
++	{
++		char r11_b[48];
++		snprintf(r11_b, sizeof(r11_b), "pc-end fam=%u", familyMatches ?
++		    (unsigned)familyMatches->getCount() : 0u);
++		if (boot_progress_stage) {
++			boot_progress_stage(r11_b);
++		}
++	}
++
+ 	if (familyMatches) {
+ 		while (!needReloc
+ 		    && (props = (OSDictionary *) familyMatches->getFirstObject())) {
+@@ -4012,6 +4161,7 @@
+ 				}
+ 
+ 				// init driver instance
++				bp_name("init", symbol->getCStringNoCopy());
+ 				if (!(inst->init( props ))) {
+ #if IOMATCHDEBUG
+ 					if (debugFlags & kIOLogStart) {
+@@ -4032,6 +4182,7 @@
+ 				}
+ 				inst->setProperty( gIOMatchCategoryKey, (OSObject *) category );
+ 				// attach driver instance
++				bp_name("attach", symbol->getCStringNoCopy());
+ 				if (!(inst->attach( this ))) {
+ 					continue;
+ 				}
+@@ -4040,6 +4191,7 @@
+ 				score = familyMatches->orderObject( props );
+ 
+ 				// & probe the new driver instance
++				bp_match_mark("probe", symbol->getCStringNoCopy());
+ #if IOMATCHDEBUG
+ 				if (debugFlags & kIOLogProbe) {
+ 					LOG("%s::probe(%s)\n",
+@@ -4145,6 +4297,7 @@
+ 						 * If a dext fails to start because an upgrade happened
+ 						 * concurrently, then the matching process has to restart
+ 						 */
++						bp_match_mark("start", inst->getMetaClass()->getClassName());
+ 						started = startCandidate( inst );
+ #if IOMATCHDEBUG
+ 						if ((debugFlags & kIOLogStart) && (false == started)) {
+@@ -4216,6 +4369,7 @@
+ 	if (startDict) {
+ 		startDict->release();
+ 	}
++	bp_name("pc-done", getName());
+ }
+ 
+ /*
+@@ -5241,12 +5395,32 @@
+ 	bool                reRegistered = true;
+ 	bool                didRegister;
+ 	OSArray *           notifiers[2] = {NULL};
++	unsigned            r11_pass = 0;
+ 
+ //    job->nub->deliverNotification( gIOPublishNotification,
+ //                              kIOServiceRegisteredState, 0xffffffff );
+ 
+ 	while (keepGuessing) {
++		r11_pass++;
++		{
++			static unsigned r11_svc_seen = 0;
++			const char *r11_sn = getName();
++			char r11_b[64];
++			snprintf(r11_b, sizeof(r11_b), "svc %u %.26s", ++r11_svc_seen,
++			    r11_sn ? r11_sn : "?");
++			if (boot_progress_stage) {
++				boot_progress_stage(r11_b);
++			}
++		}
+ 		matches = gIOCatalogue->findDrivers( this, &catalogGeneration );
++		{
++			char r11_b[48];
++			snprintf(r11_b, sizeof(r11_b), "found %u", matches ?
++			    (unsigned)matches->getCount() : 0u);
++			if (boot_progress_stage) {
++				boot_progress_stage(r11_b);
++			}
++		}
+ 		// the matches list should always be created by findDrivers()
+ 		if (matches) {
+ 			lockForArbitration();
+@@ -5289,7 +5463,11 @@
+ 			UNLOCKNOTIFY();
+ 			unlockForArbitration();
+ 			invokeNotifiers(&notifiers[0]);
++			if (keepGuessing && matches->getCount()) {
++				bp_name("res", getName());
++			}
+ 			if (keepGuessing && matches->getCount() && (kIOReturnSuccess == getResources())) {
++				bp_name("res-ok", getName());
+ 				if ((this == gIOResources) || (this == gIOUserResources)) {
+ 					if (resourceKeys) {
+ 						resourceKeys->release();
+@@ -5311,6 +5489,11 @@
+ 
+ 		if (keepGuessing) {
+ 			unlockForArbitration();
++			bp_name(reRegistered ? "loop-reg" : "loop-gen", getName());
++			if (r11_maxpass() && r11_pass >= r11_maxpass()) {
++				bp_name("loop-cap", getName());
++				keepGuessing = false;
++			}
+ 		}
+ 	}
+ 
+@@ -5330,20 +5513,26 @@
+ 
+ 	__state[1] &= ~kIOServiceConfigRunning;
+ 	unlockForArbitration();
++	bp_name("mt-a", getName());
+ 
+ 	if (resourceKeys) {
+ 		resourceKeys->release();
+ 	}
+ 
+ 	invokeNotifiers(&notifiers[0]);
++	bp_name("mt-b", getName());
+ 	invokeNotifiers(&notifiers[1]);
++	bp_name("mt-c", getName());
+ 
+ 	lockForArbitration();
+ 	__state[1] &= ~kIOServiceConfigState;
+ 	scheduleTerminatePhase2();
++	bp_name("mt-d", getName());
+ 
+ 	_adjustBusy( -1 );
++	bp_name("mt-e", getName());
+ 	unlockForArbitration();
++	bp_name("mt-f", getName());
+ }
+ 
+ UInt32
+@@ -5365,7 +5554,9 @@
+ 			count = next->__state[1] & kIOServiceBusyStateMask;
+ 			wasQuiet = (0 == count);
+ 			if (((delta < 0) && wasQuiet) || ((delta > 0) && (kIOServiceBusyMax == count))) {
++				bp_name((delta < 0) ? "badbusy-" : "badbusy+", next->getName());
+ 				OSReportWithBacktrace("%s: bad busy count (%d,%d)\n", next->getName(), (uint32_t)count, (int)delta);
++				bp_name("badbusy after", next->getName());
+ 			} else {
+ 				count += delta;
+ 			}
+diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
+index d74c063..d51fc8a 100644
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -182,7 +182,15 @@ StartIOKitMatching(void)
+ {
+ 	SOCD_TRACE_XNU(START_IOKIT);
+ 	assert(gRootNub != NULL);
++	{
++		extern void boot_progress_stage(const char *text) __attribute__((weak));
++		if (boot_progress_stage) boot_progress_stage("match: root nub");
++	}
+ 	bool ok = gRootNub->startIOServiceMatching();
++	{
++		extern void boot_progress_stage(const char *text) __attribute__((weak));
++		if (boot_progress_stage && ok) boot_progress_stage("match: root nub done");
++	}
+ 	if (__improbable(!ok)) {
+ 		panic("Failed to start IOService matching");
+ 	}
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index b790d0d..66b45b5 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -771,12 +771,15 @@ kernel_bootstrap_thread(void)
+ #ifdef  IOKIT
+ 	kernel_bootstrap_log("PE_lockdown_iokit");
+ 	PE_lockdown_iokit();
++	kernel_bootstrap_log("PE_lockdown_iokit done");
+ #endif
+ 	/*
+ 	 * max_cpus must be nailed down by the time PE_lockdown_iokit() finishes,
+ 	 * at the latest
+ 	 */
++	kernel_bootstrap_log("R11 vm_set_restrictions");
+ 	vm_set_restrictions(machine_info.max_cpus);
++	kernel_bootstrap_log("R11 vm_set_restrictions done");
+ 
+ 
+ #if KPERF
+@@ -787,6 +790,7 @@ kernel_bootstrap_thread(void)
+ 	 *	Start the user bootstrap.
+ 	 */
+ #ifdef  MACH_BSD
++	kernel_bootstrap_log("R11 bsd_init call");
+ 	bsd_init();
+ #endif
+ 

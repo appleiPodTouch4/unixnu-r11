@@ -1,0 +1,61 @@
+# R11: do not let a stuck SWRST_ALL end the eMMC probe, and read the base clock
+# from the right CAPABILITIES width.
+#
+# boot-irq21 got the driver past the register reads for the first time and the
+# panel said:
+#   EMMC step=556 ver=08b2 caps=742dc8b2 st=01ffb0c0 clk=0007 pwr=0b h=0
+#   stage ... emmc: sw reset stuck -> emmc: init failed 60
+# clk=0x0007 already has internal-clock-stable and SD-clock-enable set and
+# PRESENT_STATE reports the card inserted and stable, so the host block is alive;
+# the only blocker was SWRST_ALL never clearing, which aborts emmc_device_init()
+# before the CMD sequence -- the part that actually tells us anything about the
+# card -- is ever reached.
+#
+# Two changes, both in qcom_emmc.c:
+#  1. the reset wait is bounded to 100 ms and then continues with a
+#     "emmc: sw reset skip" checkpoint instead of returning ETIMEDOUT;
+#  2. su.base_mhz reads CAPABILITIES[15:8] as 8 bits (SDHCI 3.0) instead of 6,
+#     because caps=0x742dc8b2 means 200 MHz, not 8 MHz -- with 8 MHz the
+#     400 kHz identification divider came out 25x too fast.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -457,11 +457,22 @@
+ 	int error;
+ 
+ 	/* Software reset, then report the hardware identity. */
++	/*
++	 * SWRST_ALL is self-clearing. On this unit it stays asserted for the full
++	 * timeout after the bootloader has already initialised the host (boot-irq21:
++	 * "emmc: sw reset stuck", clk=0x0007 and card-inserted both already set). A
++	 * stuck host-controller reset does not by itself mean the card or the CMD
++	 * path is dead, and every step below reports its own verdict, so bound the
++	 * wait and continue instead of ending the whole probe here.
++	 */
+ 	hc_wr8(SDHCI_SOFTWARE_RESET, 0x01u);
+-	while (hc_rd8(SDHCI_SOFTWARE_RESET) & 1u) {
+-		if (!wait_deadline(deadline)) {
+-			BP_STAGE("emmc: sw reset stuck");
+-			return ETIMEDOUT;
++	{
++		uint64_t reset_deadline = timeout_ns(100ull * NSEC_PER_MSEC);
++		while (hc_rd8(SDHCI_SOFTWARE_RESET) & 1u) {
++			if (!wait_deadline(reset_deadline)) {
++				BP_STAGE("emmc: sw reset skip");
++				break;
++			}
+ 		}
+ 	}
+ 	hc_wr16(SDHCI_INT_ENABLE, 0);
+@@ -787,7 +798,11 @@
+ 	 * read stalls the interconnect and nothing after this stage is ever painted. */
+ 	BP_STAGE("emmc: hc read");
+ 	uint32_t caps = hc_rd(SDHCI_CAPABILITIES);
+-	su.base_mhz = (caps >> 8) & 0x3fu;
++	/* CAPABILITIES[15:8] is the base clock in MHz. It is 8 bits wide on an
++	 * SDHCI 3.0 controller (6 bits only below 3.0); the observed caps=0x742dc8b2
++	 * gives 0xc8 = 200 MHz, and reading it as a 6-bit field yields 8 MHz, which
++	 * makes the 400 kHz identification divider 25x too fast. */
++	su.base_mhz = (caps >> 8) & 0xffu;
+ 	if (!su.base_mhz) {
+ 		su.base_mhz = 100u;
+ 	}

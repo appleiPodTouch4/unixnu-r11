@@ -1,0 +1,75 @@
+# R11: acknowledge the PMIC power-control handshake before touching the card.
+#
+# boot-irq31 moved the vendor registers onto the HC BAR and CORE_VENDOR_SPEC read
+# back 0x240a0e with bits[9:8] = 2, so the default MCLK is selected and the card
+# clock routing is settled. p= was still 00: the card answers nothing at all.
+#
+# On sdhci-msm the card's bus and IO-voltage transitions are driven by the PMIC,
+# which raises a request in CORE_PWRCTL_STATUS; the AP must acknowledge it through
+# CORE_PWRCTL_CTL with the matching success bit and then clear the status. Nothing
+# in this driver ever did that (its one attempt wrote to the CQHCI range). A request
+# left pending from the bootloader-era power sequence would keep the card's rails
+# where the bootloader left them, which looks exactly like a mute card.
+#
+# This patch publishes CORE_PWRCTL_STATUS as pwrctl=, acknowledges whatever is
+# pending the way sdhci-msm's irq handler does, and only then proceeds to CMD0.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -72,6 +72,10 @@
+ /* boot-irq30: CORE_VENDOR_SPEC (0x20c) read back after selecting the default
+  * MCLK, so the panel says whether the write took. */
+ volatile unsigned int sirius_emmc_oprobe;
++/* boot-irq32: CORE_PWRCTL_STATUS as found after the clock came up. A non-zero value
++ * means the PMIC is still asking for a bus/voltage transition that nobody has
++ * acknowledged since the bootloader, which would hold the card's rails down. */
++volatile unsigned int sirius_emmc_pwrctl;
+ #define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage = __LINE__; sirius_emmc_step = __LINE__; } while (0)
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -150,6 +154,13 @@
+  * controller could divide a clock that was not routed to the card.
+  */
+ #define CORE_VENDOR_SPEC       0x20c
++/* boot-irq32: PMIC power-control handshake bits (same layout as sdhci-msm). */
++#define CORE_PWRCTL_BUS_OFF    0x1u
++#define CORE_PWRCTL_BUS_ON     0x2u
++#define CORE_PWRCTL_IO_LOW     0x4u
++#define CORE_PWRCTL_IO_HIGH    0x8u
++#define CORE_PWRCTL_BUS_SUCCESS 0x1u
++#define CORE_PWRCTL_IO_SUCCESS  0x4u
+ #define CORE_HC_MCLK_SEL_MASK  (3u << 8)
+ #define CORE_HC_MCLK_SEL_DFLT  (2u << 8)
+ 
+@@ -564,8 +575,31 @@
+ 	hc_wr16(0x3a, 0);			/* error signal enable */
+ 	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
+ 	hc_wr8(SDHCI_TIMEOUT_CONTROL, 0x0eu);
++	/*
++	 * Acknowledge any power-control request the bootloader-era sequence left
++	 * pending, exactly as sdhci-msm's irq handler does: the success bit for each
++	 * request goes to CORE_PWRCTL_CTL, then the status is cleared. Without this the
++	 * PMIC can be waiting on an ack forever, and the card never gets its rails.
++	 */
++	{
++		uint32_t st = hc_rd(CORE_PWRCTL_STATUS);
++		uint32_t ack = 0;
++		sirius_emmc_pwrctl = st;
++		if (st & (CORE_PWRCTL_BUS_ON | CORE_PWRCTL_BUS_OFF)) {
++			ack |= CORE_PWRCTL_BUS_SUCCESS;
++		}
++		if (st & (CORE_PWRCTL_IO_LOW | CORE_PWRCTL_IO_HIGH)) {
++			ack |= CORE_PWRCTL_IO_SUCCESS;
++		}
++		if (ack) {
++			hc_wr(CORE_PWRCTL_CTL, ack);
++		}
++		if (st) {
++			hc_wr(CORE_PWRCTL_CLEAR, st);
++		}
++		BP_STAGE(st ? "emmc: pwrctl ack" : "emmc: pwrctl idle");
++	}
+ 	hc_wr(CORE_PWRCTL_MASK, 0xffffffffu);
+-	hc_wr(CORE_PWRCTL_CLEAR, hc_rd(CORE_PWRCTL_STATUS));
+ 	BP_STAGE("emmc: sw reset ok");
+ 	printf("R11 eMMC: ver %04x caps %08x %08x pwrctl %08x\n",
+ 	    hc_rd16(SDHCI_HOST_VERSION), hc_rd(SDHCI_CAPABILITIES),

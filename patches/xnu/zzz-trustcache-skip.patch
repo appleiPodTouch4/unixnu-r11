@@ -1,0 +1,115 @@
+# Trust cache gate for the skipped security extensions (2026-11-03).
+#
+# Why this exists, and why the earlier rounds of this hunt measured nothing:
+#
+#   kernel_bootstrap() order (osfmk/kern/startup.c, xnu-8796.121.2)
+#
+#       723   mac_policy_initmach()      <-- security extension kexts start here
+#       742   trust_cache_runtime_init() <-- needs img4if / amfi
+#       746   load_static_trust_cache()
+#       758   OSKextRemoveKextBootstrap()
+#       763   machine_lockdown()
+#       777   PE_lockdown_iokit()       <-- StartIOKitMatching(), the first
+#                                        match pass and ArmDTPlatform::configure
+#
+#   So the root match pass runs AFTER the security extensions and AFTER the
+#   trust cache init, not before. Every image up to boot-rootreg1 parked at
+#   stage=mac_policy_initmach, which means the match pass had not started yet:
+#   ROOT passes/fnd/cand, REG e/mb/pa/ok/sr, SM a/root/needcfg and DSM a/r were
+#   all reading a stage that simply had not been reached. The zeros were not a
+#   silent return in registerService().
+#
+# With r11-skip-security-extensions=1 the whole pass is skipped and the boot
+# walks into trust_cache_init, which cannot work without the two kext-provided
+# globals:
+#
+#   trust_cache_runtime_init()   panic("image4 interface not available")
+#   load_static_trust_cache()    amfi->TrustCache.version  (amfi is NULL)
+#
+# r11-tc-skip=1 turns both into an early return, only when img4if or amfi is
+# actually missing, so a boot that starts the kexts (mask 0) is unchanged.
+# This is a bisect switch, not a fix: it isolates the security-extension wall
+# from the IOKit wall so one boot can finally answer what the match pass does.
+#
+# The PPL branch of trust_cache_runtime_init() (PMAP_CS_PPL_MONITOR) is left
+# alone: it is not compiled on this platform.
+--- a/bsd/kern/kern_trustcache.c
++++ b/bsd/kern/kern_trustcache.c
+@@ -46,6 +46,41 @@
+ static bool boot_os_tc_loaded = false;
+ static bool boot_app_tc_loaded = false;
+ 
++/*
++ * R11 bring-up switch (r11-tc-skip): let the boot continue when the security
++ * extension pass did not run.
++ *
++ * Both globals below are registered by the prelinked security extension kexts
++ * (img4if <- com.apple.security.AppleImage4, amfi <- AppleMobileFileIntegrity).
++ * With r11-skip-security-extensions=1 none of them starts, so this file's two
++ * entry points abort the boot in ways that have nothing to do with the IOKit
++ * bring-up we are chasing:
++ *
++ *   trust_cache_runtime_init()  panic("image4 interface not available")
++ *   load_static_trust_cache()   dereferences amfi->TrustCache.version (NULL)
++ *
++ * trust_cache_runtime_init() and PE_lockdown_iokit() (i.e. the first IOKit
++ * match pass) are adjacent in kernel_bootstrap() -- trust_cache_init runs
++ * first -- so without this switch the match pass is unreachable whenever the
++ * security extensions are skipped. The switch only acts when one of the two
++ * globals really is missing, so a boot that starts the kexts is unaffected.
++ */
++extern void boot_progress_stage(const char *text) __attribute__((weak));
++
++static bool
++r11_tc_skip_without_security_extensions(void)
++{
++	static int cached = -1;
++
++	if (cached < 0) {
++		unsigned value = 0;
++		PE_parse_boot_argn("r11-tc-skip", &value, sizeof(value));
++		cached = value ? 1 : 0;
++	}
++
++	return (cached != 0) && ((img4if == NULL) || (amfi == NULL));
++}
++
+ #if   PMAP_CS_PPL_MONITOR
+ /*
+  * We have the Page Protection Layer environment available. All of our artifacts
+@@ -248,6 +283,16 @@
+ 	allow_legacy_caches = true;
+ #endif
+ 
++	/* R11: see r11_tc_skip_without_security_extensions() above. */
++	if (r11_tc_skip_without_security_extensions()) {
++		if (boot_progress_stage) {
++			boot_progress_stage("R11 tc: runtime init skipped");
++		}
++		printf("R11: trust cache runtime left uninitialized (img4if=%p amfi=%p)\n",
++		    (void *)img4if, (void *)amfi);
++		return;
++	}
++
+ 	/* Image4 interface needs to be available */
+ 	if (img4if == NULL) {
+ 		panic("image4 interface not available");
+@@ -766,6 +811,18 @@
+ 	/* Mark this function as having been called */
+ 	trust_cache_static_init = true;
+ 
++	/*
++	 * R11: amfi is dereferenced unconditionally a few lines below, so the
++	 * skip has to happen here as well, not only in the runtime init.
++	 */
++	if (r11_tc_skip_without_security_extensions()) {
++		if (boot_progress_stage) {
++			boot_progress_stage("R11 tc: static caches skipped");
++		}
++		printf("R11: static trust caches skipped (no amfi interface)\n");
++		return;
++	}
++
+ 	/* Nothing to do when the runtime isn't set */
+ 	if (trust_cache_rt == NULL) {
+ 		return;

@@ -1,0 +1,62 @@
+# R11: reset CORE_VENDOR_SPEC to its power-on value before identifying the card.
+#
+# boot-irq31/33/34 left the vendor block holding what the bootloader had set up for
+# HS400: CORE_VENDOR_SPEC read 0x240a0e, and bit 18 of that is CORE_HC_SELECT_IN_EN,
+# which selects the tuned sampling path used by SDR50 and HS400. At the 100-200 kHz
+# identification clock no tuning has been done, so the controller can sample the CMD
+# line through a path that never sees a response -- indistinguishable from a card
+# that says nothing, and consistent with everything measured so far: registers fine,
+# clock routed, PMIC answering BUS_ON, and no command ever completing.
+#
+# sdhci-msm writes CORE_VENDOR_SPEC_POR_VAL (0xa9c) at probe for exactly this reason.
+# That value also has bits [9:8] = 2, i.e. it selects the default MCLK by itself, so
+# the POR write replaces the previous read-modify-write.
+#
+# SDHCI_RESPONSE is also published (as r=) after the first failed CMD1: a non-zero
+# value would mean the card did drive the response path and the remaining problem is
+# sampling rather than silence.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -76,6 +76,10 @@
+  * means the PMIC is still asking for a bus/voltage transition that nobody has
+  * acknowledged since the bootloader, which would hold the card's rails down. */
+ volatile unsigned int sirius_emmc_pwrctl;
++/* boot-irq35: SDHCI_RESPONSE as left by the last failed command. Non-zero means the
++ * card drove the response path and the controller sampled something, which would
++ * move the diagnosis from "silent card" to "bad sampling". */
++volatile unsigned int sirius_emmc_resp;
+ #define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage = __LINE__; sirius_emmc_step = __LINE__; } while (0)
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -751,6 +755,9 @@
+ 	for (int i = 0; i < 64; i++) {
+ 		error = emmc_cmd(1, 0x40ff8080u, SDHCI_CMD_RESP_R48, resp, NULL, 0);
+ 		if (error) {
++			if (i == 0) {
++				sirius_emmc_resp = hc_rd(SDHCI_RESPONSE);
++			}
+ 			/*
+ 			 * boot-irq27: CMD0 completed (it needs no response) and CMD1 came
+ 			 * back with e=0001, Command Timeout, which is the expected first
+@@ -1063,9 +1070,19 @@
+ 	 */
+ 	{
+ 		uint32_t vs = hc_rd(CORE_VENDOR_SPEC);
+-		hc_wr(CORE_VENDOR_SPEC, (vs & ~CORE_HC_MCLK_SEL_MASK) | CORE_HC_MCLK_SEL_DFLT);
++		/*
++		 * boot-irq35: the bootloader leaves this at 0x240a0e, whose bit 18 is
++		 * CORE_HC_SELECT_IN_EN -- the tuned sampling path used for SDR50/HS400.
++		 * With that set and no tuning done, the controller samples the CMD line
++		 * through a path that never sees a response, which looks exactly like a
++		 * mute card. sdhci-msm writes CORE_VENDOR_SPEC_POR_VAL (0xa9c) at probe
++		 * for this reason; that value also already selects the default MCLK in
++		 * bits [9:8], so a plain POR write is both the reset and the selection.
++		 */
++		hc_wr(CORE_VENDOR_SPEC, 0xa9cu);
+ 		sirius_emmc_oprobe = hc_rd(CORE_VENDOR_SPEC);
+-		BP_STAGE("emmc: mclk dflt");
++		BP_STAGE((sirius_emmc_oprobe == 0xa9cu) ? "emmc: vspec por" : "emmc: vspec ?");
++		(void)vs;
+ 	}
+ 	error = emmc_clocks();
+ 	if (error) {

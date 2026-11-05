@@ -1,0 +1,65 @@
+# R11: keep the command error code visible, and try a targeted CMD-line reset.
+#
+# boot-irq25 reached the CMD0 the comment always promised and CMD0 itself failed
+# with err=5 (EIO, a real error bit) -- but the panel still read h=0, so the code
+# of that error was still invisible:
+#   emmc_wait_int() publishes (ERR_INT_STATUS << 16) | INT_STATUS before clearing
+#   them, and then emmc_cmd()'s own failure block (added in boot-irq24, when the
+#   status had already been cleared) wrote sirius_emmc_halts again -- with zeros.
+# That write is removed; emmc_cmd() keeps publishing PRESENT_STATE/POWER_CONTROL.
+#
+# The failure state also showed PRESENT_STATE bit 0 (CMD inhibit) still set even
+# before the first command: the controller was already wedged in "command in
+# progress" and the skipped SWRST_ALL never cleared it. A targeted SWRST_CMD is
+# now attempted once, and the panel says whether inhibit survived, because if it
+# survives nothing sent afterwards can ever complete.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -342,13 +342,14 @@
+ 
+ 	error = emmc_wait_int(SDHCI_INT_CMD_COMPLETE, deadline, 1);
+ 	if (error) {
+-		/* Panel h= shows (error status << 16) | interrupt status for the last
+-		 * failed command, so a photograph separates a timeout from a real error
+-		 * bit without another cycle. */
+-		sirius_emmc_halts = ((uint32_t)hc_rd16(SDHCI_ERR_INT_STATUS) << 16) |
+-		    hc_rd16(SDHCI_INT_STATUS);
+-		/* Also publish the controller state at the failure, which says whether
+-		 * the command was ever taken (CMD inhibit) and what the card lines do. */
++		/*
++		 * Do NOT touch sirius_emmc_halts here: emmc_wait_int() already published
++		 * (ERR_INT_STATUS << 16) | INT_STATUS before clearing them, and this block
++		 * runs afterwards, so writing it here zeroes the only copy of the error
++		 * code (boot-irq25 showed h=0 for exactly that reason).
++		 * The controller state at the failure is still worth publishing: it says
++		 * whether the command was ever taken (CMD inhibit) and what the lines do.
++		 */
+ 		sirius_emmc_state = hc_rd(SDHCI_PRESENT_STATE);
+ 		sirius_emmc_power = hc_rd8(0x29);
+ 		return error;
+@@ -541,6 +542,25 @@
+ 	 * now -- best effort, because a card already in idle answers CMD0 with an
+ 	 * error too and that must not stop the OCR loop.
+ 	 */
++	/*
++	 * boot-irq25 failed CMD0 itself with CMD inhibit still set (PRESENT_STATE
++	 * bit0), i.e. the controller was already wedged in "command in progress"
++	 * and SWRST_ALL never cleared it. Try the targeted command-line reset once
++	 * and put the outcome on the panel: if inhibit survives this too, nothing
++	 * sent afterwards can work and the next step is the controller's clock or
++	 * power state, not the card.
++	 */
++	if (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_CMD_INHIBIT) {
++		uint64_t d = timeout_ns(10ull * NSEC_PER_MSEC);
++		hc_wr8(SDHCI_SOFTWARE_RESET, 0x02u);	/* SWRST_CMD */
++		while (hc_rd8(SDHCI_SOFTWARE_RESET) & 0x02u) {
++			if (!wait_deadline(d)) {
++				break;
++			}
++		}
++		BP_STAGE((hc_rd(SDHCI_PRESENT_STATE) & SDHCI_CMD_INHIBIT) ?
++		    "emmc: cmd inh stuck" : "emmc: cmd inh clear");
++	}
+ 	error = emmc_cmd(0, 0, SDHCI_CMD_RESP_NONE, NULL, NULL, 0);
+ 	printf("R11 eMMC: cmd0 -> %d\n", error);
+ 	BP_STAGE(error ? "emmc: cmd0 err" : "emmc: cmd0 ok");

@@ -1,0 +1,34 @@
+# R11: do not panic when no root media appears (boot-irq18).
+#
+# IOKitBSDInit() runs from bsd_autoconf(), i.e. inside bsd_init() *before* the
+# root mount loop. Its waitForService() timeout path panics with "Failed to
+# mount root device" on iOS, so vfs_mountroot() never runs -- and that is exactly
+# where qcom-emmc-root.patch probes the internal eMMC and reports the verdict on
+# the boot panel. Returning instead lets bsd_init reach the mount loop: the probe
+# runs, its rc/rdev land on the panel and the console, and "cannot mount root,
+# errno = N" repeats forever while the panel keeps repainting.
+#
+# No media appears because nothing publishes an IOMedia yet: the default match is
+# IOService::serviceMatching("IOMedia") with Content = Apple_HFS. This is a
+# bring-up switch, not a fix; delete it once a storage driver publishes media.
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -968,7 +968,17 @@
+ 			// The disk isn't found - have the user pick from System Recovery.
+ 			(void)IOSetRecoveryBoot(BSD_BOOTFAIL_MEDIA_MISSING, NULL, true);
+ #elif XNU_TARGET_OS_IOS
+-			panic("Failed to mount root device");
++			/*
++			 * R11 (OPPO R11, SDM660): no root media driver publishes an IOMedia
++			 * yet, and panicking here runs inside bsd_autoconf() *before*
++			 * vfs_mountroot(), which hides the eMMC probe that
++			 * qcom-emmc-root.patch installs there. Return instead: bsd_init then
++			 * enters its mount loop, the probe runs and reports its verdict on
++			 * the boot panel, and the kernel stays alive long enough to read it.
++			 */
++			IOLog("R11: no root media yet, leaving the wait to vfs_mountroot\n");
++			OSSafeReleaseNULL(matching);
++			return kIOReturnNotFound;
+ #endif
+ 		}
+ 	} while (!service);

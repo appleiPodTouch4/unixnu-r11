@@ -1,0 +1,86 @@
+# R11: use the sdhci-msm v5 vendor offsets, and select the default MCLK.
+#
+# boot-irq29 answered the last open question with p=00: after CMD0 completes (it
+# needs no response) none of CMD1/CMD1(arg 0)/CMD13/CMD2/CMD9 is answered, while
+# PRESENT_STATE keeps the card-inserted bit set and the CMD/DAT lines pulled high.
+# A card that answers nothing at all is not being clocked, or is not powered.
+#
+# Two concrete defects in this driver point at the clock path:
+#
+#  1. the vendor power-control offsets were 0xdc/0xe0/0xe4, which is the
+#     msm8916/8996 layout. The stock device tree names "qcom,sdhci-msm-v5", and the
+#     v5 offset table in drivers/mmc/host/sdhci-msm.c puts CORE_PWRCTL_STATUS,
+#     CORE_PWRCTL_MASK and CORE_PWRCTL_CLEAR at 0x240, 0x244 and 0x248. 0xe4 is
+#     not a power-control register on this part, and the driver wrote 0xffffffff
+#     into it;
+#
+#  2. the clock that actually leaves the pad is selected in the vendor block:
+#     CORE_VENDOR_SPEC (0x20c) bits [9:8] choose MCLK, 2 = default and 3 = HS400.
+#     sdhci-msm clears and re-selects that field on every rate change; this driver
+#     never wrote it, so the SDHCI divider could be dividing a clock that was not
+#     routed to the card. The bootloader had selected whatever mode it was using.
+#
+# The patch fixes the offsets, selects the default MCLK before any rate change, and
+# publishes CORE_VENDOR_SPEC read back as v= so the panel says whether it took.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -69,6 +69,9 @@
+  * A card left in Transfer state by the bootloader answers CMD13/CMD9 and ignores
+  * CMD1, which is only valid in idle; a card that answers nothing is not talking. */
+ volatile unsigned int qcom_emmc_probe;
++/* boot-irq30: CORE_VENDOR_SPEC (0x20c) read back after selecting the default
++ * MCLK, so the panel says whether the write took. */
++volatile unsigned int sirius_emmc_oprobe;
+ #define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage = __LINE__; sirius_emmc_step = __LINE__; } while (0)
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -121,9 +124,28 @@
+ #define SDHCI_HC_WIDTH_8       0x20u    /* bits 5:4 = 10b (8-bit); 0x10 would be 4-bit */
+ 
+ /* QCom sdhci-msm-v5 vendor block. */
+-#define CORE_PWRCTL_STATUS     0xdc
+-#define CORE_PWRCTL_CLEAR      0xe0
+-#define CORE_PWRCTL_MASK       0xe4
++/*
++ * boot-irq30: these were 0xdc/0xe0/0xe4, the msm8916/8996 layout. On sdhci-msm v5
++ * hardware -- what "qcom,sdhci-msm-v5" in the stock device tree names -- the
++ * vendor block puts them at 0x240/0x248/0x244, and 0xe4 is not a power-control
++ * register at all: writing 0xffffffff there hit an unrelated register, and the
++ * power-control status was never cleared. Taken from the v5 offset table in
++ * drivers/mmc/host/sdhci-msm.c.
++ */
++#define CORE_PWRCTL_STATUS     0x240
++#define CORE_PWRCTL_CLEAR      0x248
++#define CORE_PWRCTL_MASK       0x244
++#define CORE_PWRCTL_CTL        0x24c
++/*
++ * The clock that actually leaves the pad is selected in the vendor block, not by
++ * the SDHCI divider alone: CORE_VENDOR_SPEC bits [9:8] choose MCLK, 2 = default
++ * (everything below HS400), 3 = HS400. sdhci-msm's own set_clock clears and
++ * re-selects this field on every rate change; this driver never wrote it, so the
++ * controller could divide a clock that was not routed to the card.
++ */
++#define CORE_VENDOR_SPEC       0x20c
++#define CORE_HC_MCLK_SEL_MASK  (3u << 8)
++#define CORE_HC_MCLK_SEL_DFLT  (2u << 8)
+ 
+ #define EMMC_BLOCK             512u
+ #define PIO_CHUNK_BLOCKS       256u     /* 128 KiB per CMD18 */
+@@ -924,6 +946,17 @@
+ 	sirius_emmc_state = hc_rd(SDHCI_PRESENT_STATE);
+ 	sirius_emmc_clock = hc_rd16(SDHCI_CLOCK_CONTROL);
+ 	sirius_emmc_power = hc_rd8(0x29);	/* Power Control: no macro in this file */
++	/*
++	 * Route the default MCLK to the pad before any rate change, the way
++	 * sdhci-msm's msm_set_clock does. Read-modify-write so the other vendor bits
++	 * (the bootloader's HS400 calibration, if any) survive.
++	 */
++	{
++		uint32_t vs = core_rd(CORE_VENDOR_SPEC);
++		core_wr(CORE_VENDOR_SPEC, (vs & ~CORE_HC_MCLK_SEL_MASK) | CORE_HC_MCLK_SEL_DFLT);
++		sirius_emmc_oprobe = core_rd(CORE_VENDOR_SPEC);
++		BP_STAGE("emmc: mclk dflt");
++	}
+ 	error = emmc_clocks();
+ 	if (error) {
+ 		return error;

@@ -1,0 +1,911 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 19b4065..469511f 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -106,6 +106,7 @@ bsd/dev/dtrace/fasttrap.c		optional config_dtrace
+ bsd/dev/random/randomdev.c		standard
+ 
+ bsd/dev/memdev.c			standard
++bsd/dev/qcom_emmc.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/vfs/vfs_subr.c b/bsd/vfs/vfs_subr.c
+index 57aece6..932afa8 100644
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1219,6 +1219,51 @@ vfs_mountroot(void)
+ 	mount_t mp;
+ 	vnode_t bdevvp_rootvp;
+ 
++	/*
++	 * R11 (OPPO R11, SDM660): make rootdev point at the internal eMMC before
++	 * anything tries to use it.
++	 *
++	 * IOFindBSDRoot never assigns it: rootdev stayed NODEV and bsd_init kept
++	 * retrying vfs_mountroot forever. Probing here is provably reachable and
++	 * assigning rootdev turns the retry in bsd_init into a real mount attempt
++	 * that can report a filesystem-level error.
++	 *
++	 * The driver caches its own state, so repeated entries are free. The boot
++	 * progress hook is weak because the bootstrap pass of the XNU build links
++	 * without the kit archives, and a strong reference would turn that expected
++	 * failure into a real one. Same shape as rmx1971's sweet-ufs-root.patch.
++	 */
++	{
++		extern int qcom_emmc_rootdev(dev_t *dev);
++		extern void boot_progress_stage(const char *text) __attribute__((weak));
++		static int emmc_state = -2;     /* -2: not tried yet */
++		static dev_t emmc_dev = 0;
++
++		if (emmc_state == -2) {
++			emmc_state = qcom_emmc_rootdev(&emmc_dev);
++			printf("R11 eMMC: driver init -> %d, dev 0x%x, rootdev 0x%x\n",
++			    emmc_state, (unsigned)emmc_dev, (unsigned)rootdev);
++			if (boot_progress_stage != NULL) {
++				char stage[64];
++
++				snprintf(stage, sizeof(stage), "vfs: emmc rc=%d dev=0x%x",
++				    emmc_state, (unsigned)emmc_dev);
++				boot_progress_stage(stage);
++			}
++		}
++		if (emmc_state == 0 && rootdev == NODEV) {
++			char stage[64];
++
++			rootdev = emmc_dev;
++			printf("R11 eMMC: rootdev <- 0x%x\n", (unsigned)rootdev);
++			if (boot_progress_stage != NULL) {
++				snprintf(stage, sizeof(stage), "eMMC rootdev <- 0x%x",
++				    (unsigned)rootdev);
++				boot_progress_stage(stage);
++			}
++		}
++	}
++
+ 	/*
+ 	 * Reset any prior "unmounting everything" state.  This handles the
+ 	 * situation where mount root and then unmountall and re-mountroot
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+new file mode 100644
+index 0000000..fa4ac19
+--- /dev/null
++++ b/bsd/dev/qcom_emmc.c
+@@ -0,0 +1,837 @@
++/*
++ * Internal eMMC root device for the OPPO R11 (SDM660), read-only.
++ *
++ * SDM660 SDCC1 is a QCom "sdhci-msm-v5" host: a standard SDHCI register set at
++ * 0x0c0c4000 plus a vendor block at 0x0c0c5000. The stock ABL brought the
++ * device up (it bootstrapped from this eMMC), so the driver first reports the
++ * GCC clock gates (GCC base 0x00100000: SDCC1 BCR 0x16000, apps CBCR 0x16004,
++ * ahb CBCR 0x16008, apps RCG 0x1602c; SDM660 has no SDCC GDSC) and only turns
++ * them on if they read as gated. After the SW reset it runs the JEDEC eMMC
++ * sequence (CMD1 op-condition, CMD2/CMD3 identification, CMD8 EXT_CSD for the
++ * capacity, CMD6 bus width + high-speed) and then reads with PIO through the
++ * buffer data port - no DMA, so no bounce buffer and no cache maintenance.
++ *
++ * One GPT partition is selected by name (boot-arg emmcroot=, default
++ * "userdata") and exposed as emmcroot0 (remmcroot0) with 512-byte sectors.
++ * Writes are refused, so a failed mount cannot damage anything.
++ *
++ * Every verdict goes through boot_progress_stage() so it stays on the frame
++ * buffer: everything printf()d scrolls away before anyone can read it, and
++ * this board has no serial pads. Weak on purpose: the bootstrap pass of the
++ * XNU build links without the kit archives, and a strong reference here would
++ * turn that expected link failure into a hard error.
++ */
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/buf.h>
++#include <sys/conf.h>
++#include <sys/disk.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/locks.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
++
++extern void boot_progress_stage(const char *text) __attribute__((weak));
++#define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); } while (0)
++
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++/* SDHCI standard register map, offsets into the host controller block. */
++#define SDHCI_BLOCK_SIZE       0x04
++#define SDHCI_BLOCK_COUNT      0x06
++#define SDHCI_ARGUMENT         0x08
++#define SDHCI_TRANSFER_MODE    0x0c
++#define SDHCI_COMMAND          0x0e
++#define SDHCI_RESPONSE         0x10
++#define SDHCI_BUFFER           0x20
++#define SDHCI_PRESENT_STATE    0x24
++#define SDHCI_HOST_CONTROL     0x28
++#define SDHCI_CLOCK_CONTROL    0x2c
++#define SDHCI_TIMEOUT_CONTROL  0x2e
++#define SDHCI_SOFTWARE_RESET   0x2f
++#define SDHCI_INT_STATUS       0x30
++#define SDHCI_ERR_INT_STATUS   0x32
++#define SDHCI_INT_ENABLE       0x34
++#define SDHCI_SIGNAL_ENABLE    0x36
++#define SDHCI_CAPABILITIES     0x40
++#define SDHCI_HOST_VERSION     0xfe
++
++#define SDHCI_CMD_RESP_NONE    0x00
++#define SDHCI_CMD_RESP_R136    0x01
++#define SDHCI_CMD_RESP_R48     0x02
++#define SDHCI_CMD_RESP_R48B    0x03
++#define SDHCI_CMD_CRC          0x08
++#define SDHCI_CMD_INDEX        0x10
++#define SDHCI_CMD_DATA         0x20
++#define SDHCI_CMD(idx, flags)  (uint16_t)(((idx) & 0x3f) << 8 | ((flags) & 0xff))
++
++#define SDHCI_INT_CMD_COMPLETE 0x0001u
++#define SDHCI_INT_TX_COMPLETE  0x0002u
++#define SDHCI_INT_BUF_RDY      0x0020u
++#define SDHCI_INT_ERROR        0x8000u
++
++#define SDHCI_CMD_INHIBIT      0x0001u
++#define SDHCI_DATA_INHIBIT     0x0002u
++#define SDHCI_BUF_READ_EN      0x0800u
++#define SDHCI_DAT0_LOW         0x100000u
++
++#define SDHCI_TM_BLKCNT_EN     0x0002u
++#define SDHCI_TM_AUTO_CMD12    0x0004u
++#define SDHCI_TM_READ          0x0010u
++#define SDHCI_TM_MULTI         0x0020u
++
++#define SDHCI_HC_HS            0x04u
++#define SDHCI_HC_WIDTH_8       0x20u    /* bits 5:4 = 10b (8-bit); 0x10 would be 4-bit */
++
++/* QCom sdhci-msm-v5 vendor block. */
++#define CORE_PWRCTL_STATUS     0xdc
++#define CORE_PWRCTL_CLEAR      0xe0
++#define CORE_PWRCTL_MASK       0xe4
++
++#define EMMC_BLOCK             512u
++#define PIO_CHUNK_BLOCKS       256u     /* 128 KiB per CMD18 */
++#define CMD_TIMEOUT_NS         (3ull * NSEC_PER_SEC)
++
++static struct {
++	vm_offset_t hc;                 /* host controller registers */
++	vm_offset_t core;               /* QCom vendor block */
++	uint32_t base_mhz;              /* SDHCI reported base clock */
++	uint32_t ocr;                   /* CMD1 result; bit30 = sector addressing */
++	uint32_t rca;
++	uint64_t first_block, nblocks;  /* partition, in 512-byte sectors */
++	uint32_t clock_div;             /* current SDCLK freq field */
++	int bmajor, cmajor;
++	dev_t bdev;
++	bool ready;
++} su;
++
++static char emmc_want[64] = "userdata";
++static LCK_GRP_DECLARE(qcom_emmc_grp, "qcom_emmc");
++static LCK_MTX_DECLARE(qcom_emmc_lock, &qcom_emmc_grp);
++
++static inline uint32_t
++hc_rd(uint32_t off)
++{
++	return *(volatile uint32_t *)(su.hc + off);
++}
++
++static inline void
++hc_wr(uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(su.hc + off) = v;
++}
++
++static inline uint16_t
++hc_rd16(uint32_t off)
++{
++	return *(volatile uint16_t *)(su.hc + off);
++}
++
++static inline void
++hc_wr16(uint32_t off, uint16_t v)
++{
++	*(volatile uint16_t *)(su.hc + off) = v;
++}
++
++static inline uint8_t
++hc_rd8(uint32_t off)
++{
++	return *(volatile uint8_t *)(su.hc + off);
++}
++
++static inline void
++hc_wr8(uint32_t off, uint8_t v)
++{
++	*(volatile uint8_t *)(su.hc + off) = v;
++}
++
++static inline uint32_t
++core_rd(uint32_t off)
++{
++	return *(volatile uint32_t *)(su.core + off);
++}
++
++static inline void
++core_wr(uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(su.core + off) = v;
++}
++
++static bool
++wait_deadline(uint64_t deadline)
++{
++	return mach_absolute_time() <= deadline;
++}
++
++static uint64_t
++timeout_ns(uint64_t ns)
++{
++	uint64_t t;
++
++	nanoseconds_to_absolutetime(ns, &t);
++	return mach_absolute_time() + t;
++}
++
++/*
++ * GCC clock gates. ABL bootstrapped from this controller, so the gates are
++ * expected to read as enabled; report what we see and only intervene when a
++ * gate reads as off. Returns 0 or an errno.
++ */
++static int
++emmc_clocks(void)
++{
++	const vm_offset_t gcc = ml_io_map(0x00100000, 0x20000);
++	uint32_t apps, ahb;
++
++	if (!gcc) {
++		BP_STAGE("emmc: no gcc map");
++		return ENXIO;
++	}
++	apps = *(volatile uint32_t *)(gcc + 0x16004);
++	ahb = *(volatile uint32_t *)(gcc + 0x16008);
++	printf("R11 eMMC: gcc sdcc1 apps %08x ahb %08x bcr %08x\n", apps, ahb,
++	    *(volatile uint32_t *)(gcc + 0x16000));
++	{
++		char line[72];
++
++		snprintf(line, sizeof(line), "emmc: gcc a=%08x h=%08x", apps, ahb);
++		BP_STAGE(line);
++	}
++	if (!(apps & 1) || !(ahb & 1)) {
++		/* No GDSC on SDM660 SDCC1; branch clocks only. */
++		*(volatile uint32_t *)(gcc + 0x16008) |= 1u;
++		*(volatile uint32_t *)(gcc + 0x16004) |= 1u;
++		delay(1000);
++		apps = *(volatile uint32_t *)(gcc + 0x16004);
++		ahb = *(volatile uint32_t *)(gcc + 0x16008);
++		if (!(apps & 1) || !(ahb & 1)) {
++			printf("R11 eMMC: clock gates did not take (apps %08x ahb %08x)\n",
++			    apps, ahb);
++			BP_STAGE("emmc: clk gates off");
++			return ENXIO;
++		}
++	}
++	return 0;
++}
++
++static void
++emmc_clock_set(uint32_t div_field)
++{
++	uint64_t deadline = timeout_ns(100000ull * NSEC_PER_USEC);
++
++	hc_wr16(SDHCI_CLOCK_CONTROL, 0x0001u | (uint16_t)(div_field << 8));
++	while (!(hc_rd16(SDHCI_CLOCK_CONTROL) & 0x0002u)) {
++		if (!wait_deadline(deadline)) {
++			/* No internal clock: the SDCC block is not clocked, so every
++			 * command below would time out for the same reason. */
++			BP_STAGE("emmc: clk unstable");
++			return;
++		}
++	}
++	hc_wr16(SDHCI_CLOCK_CONTROL, 0x0101u | (uint16_t)(div_field << 8));
++	su.clock_div = div_field;
++}
++
++static uint32_t
++emmc_clock_khz(void)
++{
++	uint32_t base = su.base_mhz * 1000u;
++	uint32_t div = su.clock_div ? su.clock_div * 2u : 2u;
++
++	return div ? base / div : 0;
++}
++
++static int
++emmc_wait(uint32_t bits, int set, uint64_t deadline)
++{
++	while (((hc_rd(SDHCI_PRESENT_STATE) & bits) != 0) == !set) {
++		if (!wait_deadline(deadline)) {
++			return ETIMEDOUT;
++		}
++	}
++	return 0;
++}
++
++static int
++emmc_wait_int(uint16_t bit, uint64_t deadline, int clear)
++{
++	while (!(hc_rd16(SDHCI_INT_STATUS) & bit)) {
++		if (hc_rd16(SDHCI_INT_STATUS) & SDHCI_INT_ERROR) {
++			uint16_t err = hc_rd16(SDHCI_ERR_INT_STATUS);
++			hc_wr16(SDHCI_ERR_INT_STATUS, err);
++			hc_wr16(SDHCI_INT_STATUS, SDHCI_INT_ERROR);
++			printf("R11 eMMC: int error %04x waiting for %04x\n", err, bit);
++			return EIO;
++		}
++		if (!wait_deadline(deadline)) {
++			printf("R11 eMMC: timeout waiting for int %04x\n", bit);
++			return ETIMEDOUT;
++		}
++	}
++	if (clear) {
++		hc_wr16(SDHCI_INT_STATUS, bit);
++	}
++	return 0;
++}
++
++/* One command; response lands in su-resp words. data_len>0 = PIO read. */
++static int
++emmc_cmd(unsigned idx, uint32_t arg, uint16_t flags, uint32_t *resp,
++    uint8_t *data, uint32_t blocks)
++{
++	uint64_t deadline = timeout_ns(CMD_TIMEOUT_NS);
++	int error;
++
++	error = emmc_wait(SDHCI_CMD_INHIBIT, 0, deadline);
++	if (error) {
++		return error;
++	}
++	if (data) {
++		error = emmc_wait(SDHCI_DATA_INHIBIT, 0, deadline);
++		if (error) {
++			return error;
++		}
++		hc_wr16(SDHCI_BLOCK_SIZE, EMMC_BLOCK);
++		hc_wr16(SDHCI_BLOCK_COUNT, (uint16_t)blocks);
++		hc_wr16(SDHCI_TRANSFER_MODE,
++		    (uint16_t)(SDHCI_TM_READ | SDHCI_TM_BLKCNT_EN |
++		    (blocks > 1 ? SDHCI_TM_MULTI | SDHCI_TM_AUTO_CMD12 : 0)));
++		hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++	} else {
++		hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++	}
++	hc_wr(SDHCI_ARGUMENT, arg);
++	hc_wr16(SDHCI_COMMAND, SDHCI_CMD(idx, flags));
++
++	error = emmc_wait_int(SDHCI_INT_CMD_COMPLETE, deadline, 1);
++	if (error) {
++		return error;
++	}
++	if (resp && (flags & 0x03) != SDHCI_CMD_RESP_NONE) {
++		resp[0] = hc_rd(SDHCI_RESPONSE);
++		resp[1] = hc_rd(SDHCI_RESPONSE + 4);
++		resp[2] = hc_rd(SDHCI_RESPONSE + 8);
++		resp[3] = hc_rd(SDHCI_RESPONSE + 12);
++	}
++	if (data) {
++		for (uint32_t b = 0; b < blocks; b++) {
++			uint32_t *out = (uint32_t *)(data + (uint64_t)b * EMMC_BLOCK);
++			error = emmc_wait_int(SDHCI_INT_BUF_RDY, deadline, 1);
++			if (error) {
++				return error;
++			}
++			for (uint32_t w = 0; w < EMMC_BLOCK / 4; w++) {
++				out[w] = hc_rd(SDHCI_BUFFER);
++			}
++		}
++		error = emmc_wait_int(SDHCI_INT_TX_COMPLETE, deadline, 1);
++		if (error) {
++			return error;
++		}
++	}
++	return 0;
++}
++
++/* Read count 512-byte blocks at lba into buf. */
++static int
++emmc_read_blocks(uint64_t lba, uint32_t count, uint8_t *buf)
++{
++	int error;
++
++	while (count) {
++		uint32_t n = MIN(count, PIO_CHUNK_BLOCKS);
++
++		error = emmc_cmd(18, (uint32_t)lba, /* R1 + data */
++		    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
++		    NULL, buf, n);
++		if (error) {
++			return error;
++		}
++		lba += n;
++		buf += (uint64_t)n * EMMC_BLOCK;
++		count -= n;
++	}
++	return 0;
++}
++
++static int
++emmc_find_partition(const char *want)
++{
++	uint8_t b[512];
++	uint64_t entry_lba;
++	uint32_t nent, esz;
++	int error;
++
++	error = emmc_read_blocks(1, 1, b);
++	if (error) {
++		return error;
++	}
++	if (memcmp(b, "EFI PART", 8) != 0) {
++		printf("R11 eMMC: no GPT\n");
++		BP_STAGE("emmc: no GPT");
++		return ENXIO;
++	}
++	memcpy(&entry_lba, b + 72, 8);
++	memcpy(&nent, b + 80, 4);
++	memcpy(&esz, b + 84, 4);
++	if (esz != 128 || nent == 0 || nent > 1024) {
++		printf("R11 eMMC: unsupported GPT entries %u x %u\n", nent, esz);
++		BP_STAGE("emmc: bad GPT");
++		return ENXIO;
++	}
++	static uint8_t ents[1024 * 128];
++	error = emmc_read_blocks(entry_lba, (nent * esz + EMMC_BLOCK - 1) / EMMC_BLOCK, ents);
++	if (error) {
++		return error;
++	}
++	for (uint32_t i = 0; i < nent; i++) {
++		const uint8_t *e = ents + i * esz;
++		char name[37];
++		unsigned c;
++
++		for (c = 0; c < 36; c++) {
++			uint16_t ch = (uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8);
++
++			if (ch == 0 || ch > 0x7f) {
++				break;
++			}
++			name[c] = (char)ch;
++		}
++		name[c] = 0;
++		if (strcmp(name, want) != 0) {
++			continue;
++		}
++		uint64_t first, last;
++
++		memcpy(&first, e + 32, 8);
++		memcpy(&last, e + 40, 8);
++		if (last < first) {
++			return ENXIO;
++		}
++		su.first_block = first;
++		su.nblocks = last - first + 1;
++		{
++			char line[80];
++
++			snprintf(line, sizeof(line), "emmc: part %.20s lba=0x%llx n=%llu",
++			    name, (unsigned long long)first,
++			    (unsigned long long)(last - first + 1));
++			BP_STAGE(line);
++		}
++		return 0;
++	}
++	printf("R11 eMMC: no GPT partition named \"%s\"\n", want);
++	BP_STAGE("emmc: no part");
++	return ENOENT;
++}
++
++static int
++emmc_device_init(void)
++{
++	uint32_t resp[4];
++	uint8_t ext_csd[512];
++	uint64_t deadline = timeout_ns(2ull * NSEC_PER_SEC);
++	int error;
++
++	/* Software reset, then report the hardware identity. */
++	hc_wr8(SDHCI_SOFTWARE_RESET, 0x01u);
++	while (hc_rd8(SDHCI_SOFTWARE_RESET) & 1u) {
++		if (!wait_deadline(deadline)) {
++			BP_STAGE("emmc: sw reset stuck");
++			return ETIMEDOUT;
++		}
++	}
++	hc_wr16(SDHCI_INT_ENABLE, 0);
++	hc_wr16(SDHCI_SIGNAL_ENABLE, 0);
++	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++	hc_wr8(SDHCI_TIMEOUT_CONTROL, 0x0eu);
++	core_wr(CORE_PWRCTL_MASK, 0xffffffffu);
++	core_wr(CORE_PWRCTL_CLEAR, core_rd(CORE_PWRCTL_STATUS));
++	BP_STAGE("emmc: sw reset ok");
++	printf("R11 eMMC: ver %04x caps %08x %08x pwrctl %08x\n",
++	    hc_rd16(SDHCI_HOST_VERSION), hc_rd(SDHCI_CAPABILITIES),
++	    hc_rd(SDHCI_CAPABILITIES + 4), core_rd(CORE_PWRCTL_STATUS));
++
++	/* 400 kHz identification clock. */
++	emmc_clock_set(su.base_mhz ? su.base_mhz * 1000u / 800u : 124u);
++	/* (field units: SDCLK = base / (2 * (field + 1)); 124 -> ~400 kHz at 100 MHz) */
++
++	/* Power: 1.8 V signalling, bus on. QCom v5 may ignore this. */
++	hc_wr8(SDHCI_HOST_CONTROL + 1, 0x0bu);
++
++	/* CMD0, then CMD1 until the card leaves busy. */
++	for (int i = 0; i < 64; i++) {
++		error = emmc_cmd(1, 0x40ff8080u, SDHCI_CMD_RESP_R48, resp, NULL, 0);
++		if (error) {
++			BP_STAGE("emmc: CMD1 failed");
++			return error;
++		}
++		if (resp[0] & 0x80000000u) {
++			su.ocr = resp[0];
++			break;
++		}
++		delay(10000);
++	}
++	if (!(su.ocr & 0x80000000u)) {
++		BP_STAGE("emmc: CMD1 busy");
++		return ETIMEDOUT;
++	}
++	printf("R11 eMMC: OCR %08x\n", su.ocr);
++	{
++		char line[48];
++
++		snprintf(line, sizeof(line), "emmc: cmd1 %08x", su.ocr);
++		BP_STAGE(line);
++	}
++	if (!(su.ocr & 0x40000000u)) {
++		printf("R11 eMMC: card is not in sector mode\n");
++		BP_STAGE("emmc: byte mode");
++		return ENXIO;
++	}
++
++	error = emmc_cmd(2, 0, SDHCI_CMD_RESP_R136 | SDHCI_CMD_CRC, resp, NULL, 0);
++	if (error) {
++		BP_STAGE("emmc: CMD2 failed");
++		return error;
++	}
++	printf("R11 eMMC: CID %08x %08x %08x %08x\n", resp[0], resp[1], resp[2], resp[3]);
++	su.rca = 1;
++	error = emmc_cmd(3, su.rca << 16, SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
++	    resp, NULL, 0);
++	if (error) {
++		BP_STAGE("emmc: CMD3 failed");
++		return error;
++	}
++
++	/* 8-bit bus while still slow, then high speed. Both best effort. */
++	error = emmc_cmd(6, 0x03b70200u, /* EXT_CSD[183] = 2 (8-bit), R1b */
++	    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
++	if (!error) {
++		while (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_DAT0_LOW) {
++			if (!wait_deadline(deadline)) {
++				break;
++			}
++		}
++		uint8_t hc = hc_rd8(SDHCI_HOST_CONTROL);
++		hc_wr8(SDHCI_HOST_CONTROL, (uint8_t)(hc | SDHCI_HC_WIDTH_8));
++	} else {
++		printf("R11 eMMC: bus width switch failed %d\n", error);
++	}
++	error = emmc_cmd(6, 0x03b90100u, /* EXT_CSD[185] = 1 (HS timing), R1b */
++	    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
++	if (!error) {
++		while (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_DAT0_LOW) {
++			if (!wait_deadline(deadline)) {
++				break;
++			}
++		}
++		uint8_t hc = hc_rd8(SDHCI_HOST_CONTROL);
++		hc_wr8(SDHCI_HOST_CONTROL, (uint8_t)(hc | SDHCI_HC_HS));
++		/* High speed: base/2, capped at 52 MHz via the field. */
++		uint32_t field = su.base_mhz ? (su.base_mhz * 1000u / 2u) / 52000u : 0u;
++		emmc_clock_set(MIN(field, 0xffu));
++		printf("R11 eMMC: high speed, clk ~%u kHz\n", emmc_clock_khz());
++	} else {
++		printf("R11 eMMC: high speed switch failed %d\n", error);
++	}
++
++	/* Select the card, then read EXT_CSD for the capacity. */
++	error = emmc_cmd(7, su.rca << 16, SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
++	    resp, NULL, 0);
++	if (error) {
++		BP_STAGE("emmc: CMD7 failed");
++		return error;
++	}
++	bzero(ext_csd, sizeof(ext_csd));
++	error = emmc_cmd(8, su.rca << 16, /* SEND_EXT_CSD, R1 + 512B read */
++	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
++	    resp, ext_csd, 1);
++	if (error) {
++		BP_STAGE("emmc: CMD8 extcsd failed");
++		return error;
++	}
++	uint32_t sec_count = (uint32_t)ext_csd[212] | (uint32_t)ext_csd[213] << 8 |
++	    (uint32_t)ext_csd[214] << 16 | (uint32_t)ext_csd[215] << 24;
++	printf("R11 eMMC: ext_csd rev %u sec_count %u (%u MiB)\n",
++	    ext_csd[194], sec_count, sec_count >> 11);
++	if (!sec_count) {
++		BP_STAGE("emmc: no capacity");
++		return ENXIO;
++	}
++	{
++		char line[64];
++
++		snprintf(line, sizeof(line), "emmc: extcsd %uMiB clk%ukhz", sec_count >> 11,
++		    emmc_clock_khz());
++		BP_STAGE(line);
++	}
++	return 0;
++}
++
++static int
++qcom_emmc_open(__unused dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
++{
++	if (!su.ready) {
++		return ENXIO;
++	}
++	return (flags & FWRITE) ? EROFS : 0;
++}
++
++static int
++qcom_emmc_close(__unused dev_t dev, __unused int flags, __unused int devtype,
++    __unused struct proc *p)
++{
++	return 0;
++}
++
++static void
++qcom_emmc_strategy(buf_t bp)
++{
++	int error = 0;
++	caddr_t vaddr = NULL;
++	uint64_t off = (uint64_t)buf_blkno(bp) * EMMC_BLOCK;
++	uint32_t count = buf_count(bp);
++	uint64_t part_bytes = su.nblocks * EMMC_BLOCK;
++
++	buf_setresid(bp, count);
++	if (!(buf_flags(bp) & B_READ)) {
++		error = EROFS;
++		goto done;
++	}
++	if (off > part_bytes || count > part_bytes - off) {
++		error = EINVAL;
++		goto done;
++	}
++	if (count == 0) {
++		goto done;
++	}
++	if (buf_map(bp, &vaddr)) {
++		error = EIO;
++		goto done;
++	}
++
++	lck_mtx_lock(&qcom_emmc_lock);
++	error = emmc_read_blocks(su.first_block + off / EMMC_BLOCK,
++	    (count + EMMC_BLOCK - 1) / EMMC_BLOCK, (uint8_t *)vaddr);
++	lck_mtx_unlock(&qcom_emmc_lock);
++	buf_unmap(bp);
++	if (!error) {
++		buf_setresid(bp, 0);
++	}
++
++done:
++	if (error) {
++		buf_seterror(bp, error);
++	}
++	buf_biodone(bp);
++}
++
++static int
++qcom_emmc_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag,
++    __unused struct proc *p, int is_char)
++{
++	uint32_t *f = (uint32_t *)data;
++	uint64_t *o = (uint64_t *)data;
++
++	switch (cmd) {
++	case DKIOCGETBLOCKSIZE:
++		*f = EMMC_BLOCK;
++		return 0;
++	case DKIOCSETBLOCKSIZE:
++		if (is_char) {
++			return ENODEV;
++		}
++		if (*f != EMMC_BLOCK) {
++			return EINVAL;
++		}
++		return 0;
++	case DKIOCGETPHYSICALBLOCKSIZE:
++		*f = EMMC_BLOCK;
++		return 0;
++	case DKIOCGETBLOCKCOUNT:
++		*o = su.nblocks;
++		return 0;
++	case DKIOCISWRITABLE:
++		*f = 0;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTREAD:
++		*o = PIO_CHUNK_BLOCKS;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTWRITE:
++		*o = 0;
++		return 0;
++	case DKIOCGETMAXSEGMENTCOUNTREAD:
++	case DKIOCGETMAXSEGMENTCOUNTWRITE:
++		*o = 1;
++		return 0;
++	default:
++		return ENOTTY;
++	}
++}
++
++static int
++qcom_emmc_bioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return qcom_emmc_ioctl(dev, cmd, data, flag, p, 0);
++}
++
++static int
++qcom_emmc_cioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return qcom_emmc_ioctl(dev, cmd, data, flag, p, 1);
++}
++
++static int
++qcom_emmc_psize(__unused dev_t dev)
++{
++	return su.ready ? (int)MIN(su.nblocks, INT_MAX) : -1;
++}
++
++static int
++qcom_emmc_read(dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	return physio(qcom_emmc_strategy, NULL, dev, B_READ, minphys, uio, (int)EMMC_BLOCK);
++}
++
++static int
++qcom_emmc_write(__unused dev_t dev, __unused struct uio *uio, __unused int ioflag)
++{
++	return EROFS;
++}
++
++static const struct bdevsw qcom_emmc_bdevsw = {
++	.d_open     = qcom_emmc_open,
++	.d_close    = qcom_emmc_close,
++	.d_strategy = qcom_emmc_strategy,
++	.d_ioctl    = qcom_emmc_bioctl,
++	.d_dump     = eno_dump,
++	.d_psize    = qcom_emmc_psize,
++	.d_type     = D_DISK,
++};
++
++static const struct cdevsw qcom_emmc_cdevsw = {
++	.d_open       = qcom_emmc_open,
++	.d_close      = qcom_emmc_close,
++	.d_read       = qcom_emmc_read,
++	.d_write      = qcom_emmc_write,
++	.d_ioctl      = qcom_emmc_cioctl,
++	.d_stop       = eno_stop,
++	.d_reset      = eno_reset,
++	.d_ttys       = NULL,
++	.d_select     = eno_select,
++	.d_mmap       = eno_mmap,
++	.d_strategy   = eno_strat,
++	.d_reserved_1 = eno_getc,
++	.d_reserved_2 = eno_putc,
++	.d_type       = D_DISK,
++};
++
++static int
++qcom_emmc_init(void)
++{
++	char want[64] = "userdata";
++	int error;
++
++	PE_parse_boot_argn("emmcroot", want, sizeof(want));
++	strlcpy(emmc_want, want, sizeof(emmc_want));
++
++	/* Reachability verdict: if this never shows up on the panel, vfs_mountroot was
++	 * never entered and the driver is not the thing that hung. */
++	BP_STAGE("emmc: probe");
++	su.hc = ml_io_map(0x0c0c4000, 0x1000);
++	su.core = ml_io_map(0x0c0c5000, 0x1000);
++	if (!su.hc || !su.core) {
++		BP_STAGE("emmc: no regs map");
++		return ENXIO;
++	}
++	BP_STAGE("emmc: regs ok");
++	error = emmc_clocks();
++	if (error) {
++		return error;
++	}
++	/* Base clock from capabilities; field 0 = vendor clock, assume 100 MHz.
++	 * This is the first access to the SDHCI block: if the SDCC branch is gated the
++	 * read stalls the interconnect and nothing after this stage is ever painted. */
++	BP_STAGE("emmc: hc read");
++	uint32_t caps = hc_rd(SDHCI_CAPABILITIES);
++	su.base_mhz = (caps >> 8) & 0x3fu;
++	if (!su.base_mhz) {
++		su.base_mhz = 100u;
++	}
++	{
++		char line[72];
++
++		snprintf(line, sizeof(line), "emmc: caps %08x base %umhz", caps,
++		    su.base_mhz);
++		BP_STAGE(line);
++	}
++
++	lck_mtx_lock(&qcom_emmc_lock);
++	error = emmc_device_init();
++	if (!error) {
++		BP_STAGE("emmc: dev init ok");
++		error = emmc_find_partition(want);
++	}
++	lck_mtx_unlock(&qcom_emmc_lock);
++	if (error) {
++		return error;
++	}
++
++	su.bmajor = bdevsw_add(-1, &qcom_emmc_bdevsw);
++	if (su.bmajor < 0) {
++		return ENXIO;
++	}
++	su.cmajor = cdevsw_add_with_bdev(-1, &qcom_emmc_cdevsw, su.bmajor);
++	if (su.cmajor < 0) {
++		return ENXIO;
++	}
++	su.bdev = makedev(su.bmajor, 0);
++	devfs_make_node(su.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "emmcroot0");
++	devfs_make_node(makedev(su.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "remmcroot0");
++	su.ready = true;
++	BP_STAGE("emmc: devfs ok");
++	printf("R11 eMMC: \"%s\": first block 0x%llx, %llu MiB, read-only\n",
++	    want, su.first_block, su.nblocks * EMMC_BLOCK >> 20);
++	{
++		char line[96];
++
++		snprintf(line, sizeof(line), "emmc ok: %.12s 0x%llx %lluMiB ro",
++		    emmc_want, (unsigned long long)su.first_block,
++		    (unsigned long long)(su.nblocks * EMMC_BLOCK >> 20));
++		BP_STAGE(line);
++	}
++	return 0;
++}
++
++/* Root device for rd=emmcroot0. */
++int qcom_emmc_rootdev(dev_t *dev);
++
++int
++qcom_emmc_rootdev(dev_t *dev)
++{
++	static int reported;
++
++	if (!su.ready) {
++		int error = qcom_emmc_init();
++		if (error) {
++			if (!reported) {
++				char line[72];
++
++				reported = 1;
++				snprintf(line, sizeof(line), "emmc: init failed %d", error);
++				BP_STAGE(line);
++			}
++			return error;
++		}
++	}
++	*dev = su.bdev;
++	return 0;
++}

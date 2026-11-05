@@ -1,0 +1,163 @@
+# Security-extension bypass for the frozen mac_policy_initmach stage (2026-11-02).
+#
+# History, because the shape of this patch changed after each hardware run:
+#
+#   Round 1 skipped the whole security extension pass at the call site
+#   (security/mac_base.c). The panel then moved from stage=mac_policy_initmach to
+#   stage=trust_cache_init -- i.e. the park really is inside one of those kexts'
+#   start() -- and panic'd right there with
+#       image4 interface not available @kern_trustcache.c:253
+#   which is bsd/kern/kern_trustcache.c's
+#       if (img4if == NULL) panic("image4 interface not available");
+#   (the amfi == NULL panic on line 258 is the next one in line). Both globals are
+#   registered by the security extension kexts themselves:
+#       img4if <- com.apple.security.AppleImage4
+#       amfi   <- com.apple.driver.AppleMobileFileIntegrity
+#   so skipping the whole pass cannot work; the bypass has to name one kext.
+#
+#   Round 2 moved the switch into KLDBootstrap::loadSecurityExtensions() and made
+#   r11-skip-security-extensions a bit mask:
+#       0  stock: start every security extension
+#       1  skip the whole pass (the round-1 behaviour, kept for comparison)
+#       2  skip com.apple.security.sandbox
+#       4  skip com.apple.driver.AppleMobileFileIntegrity
+#       8  skip com.apple.security.AppleImage4
+#   (4 and 8 only trade one panic for another: they remove the img4if / amfi
+#   registrations that trust_cache_runtime_init() panics on.)
+#   Round 2 also cached the parsed mask in a function-local static. That was a
+#   mistake and cost a hardware round -- see round 3.
+#
+#   Round 3 (this patch) drops that cache. The panel from round 2 showed
+#       Unexpected fault in kernel static region
+#        at pc 0xfffffff007a20e30 ... esr 0x9600004f  far 0xfffffff007a28878
+#   and the disassembly of that PC is
+#       fffffff007a20e30:  str  wzr, [x19, #2168]     ; x19 = 0xfffffff007a28000
+#   i.e. exactly "cached = 0". far 0xfffffff007a28878 is
+#   __ZZL22r11_skip_security_modevE6cached in __KLDDATA.__data, and the ESR says
+#   data abort, write, permission fault level 3 -- that page is read-only at
+#   runtime. __KLDDATA is the one place libsa must NOT keep writable state: in
+#   Apple's own build its __data section is empty (all libsa writable state lives
+#   in exported pointers such as load_security_extensions_function, which sit in
+#   __DATA). The store therefore panicked on entry, before any kext was looked at,
+#   for every value of the mask including 0 -- which is why the round-2 panel still
+#   showed "stage: mac_policy_initmach": that is the last stage recorded, not where
+#   the boot actually died.
+#
+# So the helper now parses the boot-arg on every call (it is called once per boot),
+# keeping all state on the stack. Mask semantics are unchanged from round 2.
+#
+# Known state at the time of writing: mac_policy_initmach -> loadSecurityExtensions
+# -> OSKext::loadKextWithIdentifier -> OSKext::load -> OSKext::start parked on the
+# boot thread, with "failed to get mix-n-match policy: 2" on screen. Everything
+# start() could wait on needs the machine timer, which this port does not have yet
+# (panel IRQ=0), so the park cannot time out. This patch is a bisect tool, not a
+# configuration: with sandbox skipped nothing userland-side behaves normally.
+diff --git a/libsa/bootstrap.cpp b/libsa/bootstrap.cpp
+index f0f770a..e68acc5 100644
+--- a/libsa/bootstrap.cpp
++++ b/libsa/bootstrap.cpp
+@@ -501,6 +501,73 @@ finish:
+ *********************************************************************/
+ #define COM_APPLE  "com.apple."
+ 
++/*
++ * R11 bring-up: per-kext bypass for the security extension start pass.
++ * See the header of zzz-skip-security-extensions.patch for the full story.
++ *
++ * The 16.5 panel proved that skipping the whole pass walks past
++ * mac_policy_initmach (stage moved on to trust_cache_init) and then panics in
++ * trust_cache_runtime_init() with "image4 interface not available", because that
++ * runtime hard-requires the img4if and amfi globals registered by
++ * com.apple.security.AppleImage4 and com.apple.driver.AppleMobileFileIntegrity.
++ * So the park has to be isolated to one kext instead of the whole pass.
++ *
++ * r11-skip-security-extensions is a bit mask so the next boot can pick a
++ * different kext without rebuilding the kernel -- only board.toml's command line
++ * has to change, and payload+bootimg take seconds:
++ *
++ *   0  stock (default): start everything
++ *   1  skip the whole pass (what boot-secskip1.img did)
++ *   2  skip com.apple.security.sandbox
++ *   4  skip com.apple.driver.AppleMobileFileIntegrity
++ *   8  skip com.apple.security.AppleImage4
++ *   bits combine, e.g. 6 = sandbox + AMFI
++ *
++ * Skipping AMFI or AppleImage4 is only interesting as an experiment: either one
++ * makes trust_cache_runtime_init() panic a few lines later.
++ */
++extern "C" boolean_t PE_parse_boot_argn(const char *arg_string, void *arg_ptr,
++    int max_len);
++
++/*
++ * Reads the boot-arg on every call on purpose: this file is linked into the
++ * __KLD segment, whose __KLDDATA is mapped read-only at runtime (its __data
++ * section is empty in every Apple build). A cached copy here cost one hardware
++ * round: the store "str wzr, [x19, #2168]" at loadSecurityExtensions+0x30 took
++ * a level-3 write permission fault on 0xfffffff007a28878 and panicked before
++ * the pass ever ran. Called once or twice per boot, so the parse is free.
++ */
++static int
++r11_skip_security_mode(void)
++{
++	int value = 0;
++
++	if (!PE_parse_boot_argn("r11-skip-security-extensions",
++	    &value, sizeof(value))) {
++		return 0;
++	}
++	return value > 0 ? value : 0;
++}
++
++static bool
++r11_skip_security_kext(const char *bundle_id, int mode)
++{
++	if (mode == 1) {
++		return true;
++	}
++	if ((mode & 2) && strcmp(bundle_id, "com.apple.security.sandbox") == 0) {
++		return true;
++	}
++	if ((mode & 4) &&
++	    strcmp(bundle_id, "com.apple.driver.AppleMobileFileIntegrity") == 0) {
++		return true;
++	}
++	if ((mode & 8) && strcmp(bundle_id, "com.apple.security.AppleImage4") == 0) {
++		return true;
++	}
++	return false;
++}
++
+ void
+ KLDBootstrap::loadSecurityExtensions(void)
+ {
+@@ -508,6 +575,15 @@ KLDBootstrap::loadSecurityExtensions(void)
+ 	OSSharedPtr<OSCollectionIterator> keyIterator;
+ 	OSString             * bundleID       = NULL;// don't release
+ 	OSKext               * theKext        = NULL;// don't release
++	int                    skipMode       = r11_skip_security_mode();
++
++	if (skipMode == 1) {
++		OSKextLog(/* kext */ NULL,
++		    kOSKextLogStepLevel |
++		    kOSKextLogLoadFlag,
++		    "R11: security extension pass skipped entirely.");
++		return;
++	}
+ 
+ 	OSKextLog(/* kext */ NULL,
+ 	    kOSKextLogStepLevel |
+@@ -544,6 +620,14 @@ KLDBootstrap::loadSecurityExtensions(void)
+ 		}
+ 
+ 		if (kOSBooleanTrue == theKext->getPropertyForHostArch(kAppleSecurityExtensionKey)) {
++			if (r11_skip_security_kext(bundle_id, skipMode)) {
++				OSKextLog(/* kext */ NULL,
++				    kOSKextLogStepLevel |
++				    kOSKextLogLoadFlag,
++				    "R11: security extension %s skipped (mode %d).",
++				    bundle_id, skipMode);
++				continue;
++			}
+ 			OSKextLog(/* kext */ NULL,
+ 			    kOSKextLogStepLevel |
+ 			    kOSKextLogLoadFlag,
