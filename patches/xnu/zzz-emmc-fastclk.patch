@@ -1,0 +1,41 @@
+# R11: raise the card clock before the first data transfer.
+#
+# boot-irq41 got through the whole EXT_CSD command and read back zeros: "emmc: rev 0
+# sec 0", then "emmc: no capacity". The command phase is not the problem -- C0..C3 all
+# passed and the buffer was consumed -- so the data never arrived.
+#
+# The cause is the clock rate. This driver runs the card at the ~100 kHz identification
+# rate for everything, including the first data transfer: a 512-byte block takes
+# 512*8/100k = 41 ms, far longer than the controller's data timeout (which the SDHCI
+# DAT timeout register bounds, and which is a few milliseconds at most on this part).
+# The transfer is aborted mid-block and the buffer reads back as zeros, with no error
+# bit that this driver looks at.
+#
+# Once CMD7 has selected the card it is in Transfer state and the identification rate
+# no longer applies, so the clock is raised to 1 MHz (divider field 25 -> N = 100 ->
+# 200 MHz/(2*100)) before CMD8. A 512-byte block then takes 4 ms, inside default-speed
+# timing and inside the controller's window. The panel records "emmc: clk 1mhz" so the
+# change is visible in the stage history.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -880,6 +880,20 @@
+ 		BP_STAGE(line);
+ 	}
+ 
++	/*
++	 * boot-irq42: the card is selected and in Transfer state, so the identification
++	 * clock limit no longer applies. Raise it before the first data transfer: at the
++	 * ~100 kHz identification rate a 512-byte block takes 41 ms, which is longer than
++	 * the controller's data timeout, so the transfer is aborted and the buffer reads
++	 * back as zeros -- exactly boot-irq41's "emmc: rev 0 sec 0" with CFG/BUF_RDY
++	 * having "succeeded".
++	 *
++	 * Divider field 25 gives N = 25*4 = 100, i.e. 200 MHz / (2*100) = 1 MHz, which
++	 * puts a 512-byte block at 4 ms and still inside default-speed timing.
++	 */
++	emmc_clock_set(25u);
++	BP_STAGE("emmc: clk 1mhz");
++
+ 	bzero(ext_csd, sizeof(ext_csd));
+ 	error = emmc_cmd(8, su.rca << 16, /* SEND_EXT_CSD, R1 + 512B read */
+ 	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,

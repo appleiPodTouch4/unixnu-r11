@@ -1,0 +1,60 @@
+# R11: CMD7 without the busy response, then read the card status with CMD13.
+#
+# boot-irq37 issued CMD7 for the first time with the card in Stand-by (CMD6 no longer
+# came first) and reported "emmc: CMD7 err 50 rca 1" -- but the panel's last command
+# error was e=eeee, meaning the wait expired with no SDHCI error bit set. That is the
+# signature of the R1b busy handshake: with a busy response type the controller waits
+# for DAT0 to stop reading busy, and when that never happens it times out without an
+# error bit. The card's own status was never consulted.
+#
+# Two changes:
+#  1. CMD7 asks for a plain 48-bit response (R48) instead of R48B. Observing the busy
+#     signal after CMD7 is optional for the host, and the card's state is verified
+#     explicitly by the next step;
+#  2. right after CMD7 the driver sends CMD13 (SEND_STATUS) and puts the 32-bit card
+#     status word on the panel. That single word says whether the card really reached
+#     Transfer state (bits 12:9 = CURRENT_STATE, 4 = STBY) and separates "selected but
+#     busy" from "never selected".
+#
+# The CMD7 error is also printed in hex, because the decimal value seen so far (50)
+# does not match any errno this driver can return (EIO 5, ETIMEDOUT 60, ENXIO 6).
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -819,14 +819,34 @@
+ 	 * consequence of driving the card through an illegal state rather than a
+ 	 * defect in CMD7 itself.
+ 	 */
+-	error = emmc_cmd(7, su.rca << 16, SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
++	/*
++	 * boot-irq38: CMD7 timed out with no error bit at all (panel e=eeee), which is
++	 * what the controller's R1b busy handshake produces when DAT0 never reads busy
++	 * cleared. Ask for the plain 48-bit response instead: the busy signaling after
++	 * CMD7 is optional for the host to observe, and the card's real state is then
++	 * read back with CMD13 below. The error is also printed in hex, because the
++	 * value reported so far (50) matches no errno this driver can return.
++	 */
++	error = emmc_cmd(7, su.rca << 16, SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
+ 	    resp, NULL, 0);
+ 	if (error) {
+-		char line[56];
+-		snprintf(line, sizeof(line), "emmc: CMD7 err %d rca %x", error, su.rca);
++		char line[64];
++		snprintf(line, sizeof(line), "emmc: CMD7 err %d/%02x rca %x",
++		    error, (unsigned)(error & 0xff), su.rca);
+ 		BP_STAGE(line);
+ 		return error;
+ 	}
++	{
++		/* CMD13 SEND_STATUS: confirms the card really entered Transfer state and
++		 * puts its 32-bit status word on the panel. */
++		uint32_t st_resp[4] = { 0, 0, 0, 0 };
++		int st_err = emmc_cmd(13, su.rca << 16,
++		    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, st_resp, NULL, 0);
++		char line[64];
++		snprintf(line, sizeof(line), "emmc: c7 ok st %08x e%d",
++		    st_resp[0], st_err);
++		BP_STAGE(line);
++	}
+ 	/* Now in Transfer state: 8-bit bus, then high speed. Both best effort. */
+ 	error = emmc_cmd(6, 0x03b70200u, /* EXT_CSD[183] = 2 (8-bit), R1b */
+ 	    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);

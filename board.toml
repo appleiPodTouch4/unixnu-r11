@@ -381,7 +381,33 @@ kernel_args = [
   # sampling path) from the bootloader, which can swallow every response at the
   # identification clock. It is now reset to the POR value 0xa9c, and the RESPONSE
   # register is published as r= after a failed CMD1.
-  "sheng-build-tag=irq35",
+  # irq36: CORE_VENDOR_SPEC POR (0xa9c) cleared the HS400 select-in path and CMD1
+  # answered (p=03), so identification now works; the probe fails later with err=50
+  # and the stage that failed was pushed out of the history by the mountroot retry
+  # loop. Those two alternating stages are no longer recorded, so the failing stage
+  # survives to a photograph.
+  # irq37: irq36 showed CMD7 failing, and the cause is order -- CMD6 (SWITCH) was
+  # issued while the card was in Stand-by, where it is illegal. CMD7 now selects the
+  # card first, then the two CMD6 calls, then CMD8/EXT_CSD; the busy waits get fresh
+  # deadlines and a failed CMD7 reports its error code and RCA.
+  # irq38: CMD7 timed out with no error bit (e=eeee) -- the R1b busy handshake. CMD7
+  # now uses a plain R48 response and is followed by CMD13 so the card's status word
+  # says whether it reached Transfer state; the error is printed in hex too.
+  # irq39: CMD7 passed (status 0x00000900 = Transfer) and CMD8 timed out because the
+  # bus had already been switched to 8-bit/HS before the first data transfer. EXT_CSD
+  # is now read in 1-bit and the width/timing changes follow it, each reporting on the
+  # panel.
+  # irq40: the first data command still times out with a flat e=eeee and PRESENT_STATE
+  # bit1 (DAT inhibit) set, so the data phase stalls somewhere inside emmc_cmd. Every
+  # wait now stamps a marker and the timeout encodes it: e=eeC0..eeC4 names the step.
+  # irq41: e=eec4 proved the EXT_CSD data arrives (C0..C3 passed) and only Transfer
+  # Complete never fires. That timeout is now tolerated for single-block PIO reads
+  # (SWRST_DAT + status clear, marker cc04) and the content is verified by printing
+  # EXT_CSD revision and sector count on the panel.
+  # irq42: EXT_CSD read back as zeros because the whole probe ran at the ~100 kHz
+  # identification clock, where a 512-byte block needs 41 ms -- longer than the
+  # controller's data timeout. The clock is raised to 1 MHz right after CMD7.
+  "sheng-build-tag=irq42",
   # boot-irq11b.img was this list + this line on the irq11 kernel; from irq12 on
   # it is part of the main line: the timer handler also calls rtclock_intr(0),
   # because without it the first tick only counts and re-arms CNTV_CVAL, XNU's

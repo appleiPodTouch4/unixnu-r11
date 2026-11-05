@@ -1,0 +1,72 @@
+# R11: stamp each wait in the command path so a timeout says which one expired.
+#
+# boot-irq39 read EXT_CSD on the proven 1-bit bus, after CMD7 had already been shown to
+# work (status 0x00000900, CURRENT_STATE = Transfer), and CMD8 still timed out with the
+# flat e=eeee marker. PRESENT_STATE at that moment had bit 1 -- Command Inhibit (DAT) --
+# set, so the controller had entered the data phase and then stalled somewhere inside
+# it, but the panel could not say where: command-complete, buffer-read-ready and
+# transfer-complete all collapse into the same "timed out, no error bit".
+#
+# Each wait now writes a marker into qcom_emmc_lasterr before blocking, and the timeout
+# path encodes it instead of overwriting it (EE00 | marker), so the next photograph
+# names the exact step:
+#   eeC0 CMD inhibit   eeC1 DAT inhibit   eeC2 command complete
+#   eeC3 buffer read ready               eeC4 transfer complete
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -359,7 +359,7 @@
+ 		}
+ 		if (!wait_deadline(deadline)) {
+ 			sirius_emmc_halts = 0xdead0000u | hc_rd16(SDHCI_INT_STATUS);
+-			qcom_emmc_lasterr = 0xEEEEu;
++			qcom_emmc_lasterr = 0xEE00u | (qcom_emmc_lasterr & 0xffu);
+ 			printf("R11 eMMC: timeout waiting for int %04x\n", bit);
+ 			return ETIMEDOUT;
+ 		}
+@@ -378,11 +378,22 @@
+ 	uint64_t deadline = timeout_ns(CMD_TIMEOUT_NS);
+ 	int error;
+ 
++	/*
++	 * boot-irq40: boot-irq39 still failed CMD8 (the first data command) with a bare
++	 * timeout, and PRESENT_STATE bit 1 -- Command Inhibit (DAT) -- was set, so the
++	 * data phase had started and then stalled. Which wait expired was not visible,
++	 * so each one stamps a marker that a timeout preserves: the panel's e= then
++	 * reads EE00|marker instead of a flat EEEE.
++	 *   C0 CMD inhibit   C1 DAT inhibit   C2 command complete
++	 *   C3 buffer read ready             C4 transfer complete
++	 */
++	qcom_emmc_lasterr = 0xC0u;
+ 	error = emmc_wait(SDHCI_CMD_INHIBIT, 0, deadline);
+ 	if (error) {
+ 		return error;
+ 	}
+ 	if (data) {
++		qcom_emmc_lasterr = 0xC1u;
+ 		error = emmc_wait(SDHCI_DATA_INHIBIT, 0, deadline);
+ 		if (error) {
+ 			return error;
+@@ -399,6 +410,7 @@
+ 	hc_wr(SDHCI_ARGUMENT, arg);
+ 	hc_wr16(SDHCI_COMMAND, SDHCI_CMD(idx, flags));
+ 
++	qcom_emmc_lasterr = 0xC2u;
+ 	error = emmc_wait_int(SDHCI_INT_CMD_COMPLETE, deadline, 1);
+ 	if (error) {
+ 		/*
+@@ -422,6 +434,7 @@
+ 	if (data) {
+ 		for (uint32_t b = 0; b < blocks; b++) {
+ 			uint32_t *out = (uint32_t *)(data + (uint64_t)b * EMMC_BLOCK);
++			qcom_emmc_lasterr = 0xC3u;
+ 			error = emmc_wait_int(SDHCI_INT_BUF_RDY, deadline, 1);
+ 			if (error) {
+ 				return error;
+@@ -430,6 +443,7 @@
+ 				out[w] = hc_rd(SDHCI_BUFFER);
+ 			}
+ 		}
++		qcom_emmc_lasterr = 0xC4u;
+ 		error = emmc_wait_int(SDHCI_INT_TX_COMPLETE, deadline, 1);
+ 		if (error) {
+ 			return error;

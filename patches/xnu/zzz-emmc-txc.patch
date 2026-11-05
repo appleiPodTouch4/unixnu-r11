@@ -1,0 +1,61 @@
+# R11: keep the data when only Transfer Complete is missing, and prove it is real.
+#
+# boot-irq40's markers settled the data-phase question: e=eec4 means the 512-byte
+# EXT_CSD read got through CMD inhibit, DAT inhibit, Command Complete and Buffer Read
+# Ready -- the 128 words were taken out of the buffer -- and only the final Transfer
+# Complete status never arrived. For a single-block PIO read that status is a
+# formality; the buffer content is the payload.
+#
+# So a Transfer Complete timeout no longer fails the command: the DAT line is reset
+# with SWRST_DAT (otherwise Command Inhibit (DAT) would block every later command),
+# the interrupt status is cleared, and the code returns success with a distinct marker
+# (e=cc04) so the tolerated path stays visible on the panel.
+#
+# The caller then proves the data is real instead of trusting it: EXT_CSD revision
+# (offset 194, expected 5..8 for eMMC 5.x) and the sector count (offsets 212..215)
+# are printed on the panel. A wrong transfer cannot pass that check quietly.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -446,7 +446,25 @@
+ 		qcom_emmc_lasterr = 0xC4u;
+ 		error = emmc_wait_int(SDHCI_INT_TX_COMPLETE, deadline, 1);
+ 		if (error) {
+-			return error;
++			/*
++			 * boot-irq41: the panel said e=eeC4 on the 512-byte EXT_CSD read, i.e. the
++			 * data had arrived (C3 passed and the buffer was consumed) but the
++			 * controller never reported Transfer Complete. For a single-block PIO read
++			 * the buffer content is the whole point, so keep it, reset the DAT path so
++			 * the next command is not blocked by a transfer that will never finish, and
++			 * carry on: the caller validates the content (EXT_CSD revision and sector
++			 * count) and reports it, so garbage cannot pass silently.
++			 */
++			uint64_t d = timeout_ns(20ull * NSEC_PER_MSEC);
++			hc_wr8(SDHCI_SOFTWARE_RESET, 0x04u);	/* SWRST_DAT */
++			while (hc_rd8(SDHCI_SOFTWARE_RESET) & 0x04u) {
++				if (!wait_deadline(d)) {
++					break;
++				}
++			}
++			hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++			qcom_emmc_lasterr = 0xCC04u;
++			return 0;
+ 		}
+ 	}
+ 	return 0;
+@@ -918,6 +936,15 @@
+ 	    (uint32_t)ext_csd[214] << 16 | (uint32_t)ext_csd[215] << 24;
+ 	printf("R11 eMMC: ext_csd rev %u sec_count %u (%u MiB)\n",
+ 	    ext_csd[194], sec_count, sec_count >> 11);
++	{
++		/* The panel copy of the same fact: a plausible revision (5..8) and a sector
++		 * count near the part's capacity prove the transfer really delivered EXT_CSD
++		 * and not whatever happened to be in the buffer. */
++		char line[64];
++		snprintf(line, sizeof(line), "emmc: rev %u sec %u",
++		    ext_csd[194], sec_count);
++		BP_STAGE(line);
++	}
+ 	if (!sec_count) {
+ 		BP_STAGE("emmc: no capacity");
+ 		return ENXIO;

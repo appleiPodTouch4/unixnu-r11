@@ -1,0 +1,73 @@
+# R11: read EXT_CSD before switching the bus width, and show each bus change.
+#
+# boot-irq38 got past SELECT_CARD: CMD7 with a plain R48 response succeeded and CMD13
+# read back 0x00000900, whose CURRENT_STATE field (bits 12:9) is 4 = Transfer. The
+# probe then timed out on CMD8, the 512-byte EXT_CSD read (err 60, e=eeee).
+#
+# The order was wrong for a different reason this time: the driver switched the card
+# to 8-bit (CMD6 EXT_CSD[183] = 2) and to high-speed timing before the first data
+# transfer, so the very first data read ran on a bus configuration that had never been
+# exercised -- and in 8-bit mode every DAT line has to be right, not just DAT0. The
+# kernel's own mmc core reads EXT_CSD while still on the proven 1-bit bus and switches
+# width afterwards; this patch does the same.
+#
+# The two CMD6 calls also report their outcome on the panel now ("emmc: bus8 ok",
+# "emmc: hs ok", or the corresponding failure), because they are best effort and
+# previously printed only to a console nobody can read.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -847,6 +847,23 @@
+ 		    st_resp[0], st_err);
+ 		BP_STAGE(line);
+ 	}
++
++	bzero(ext_csd, sizeof(ext_csd));
++	error = emmc_cmd(8, su.rca << 16, /* SEND_EXT_CSD, R1 + 512B read */
++	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
++	    resp, ext_csd, 1);
++	if (error) {
++		BP_STAGE("emmc: CMD8 extcsd failed");
++		return error;
++	}
++	/*
++	 * boot-irq39: switch the bus only after EXT_CSD has been read. boot-irq38 reached
++	 * CMD7 (status 0x00000900, CURRENT_STATE = 4 = Transfer) and then timed out on
++	 * CMD8, the 512-byte EXT_CSD read -- but it had already switched the card to
++	 * 8-bit before that read. Reading EXT_CSD in 1-bit and changing the width
++	 * afterwards is the order the kernel's own mmc core uses, and it keeps the first
++	 * data transfer on the bus configuration that has already been proven.
++	 */
+ 	/* Now in Transfer state: 8-bit bus, then high speed. Both best effort. */
+ 	error = emmc_cmd(6, 0x03b70200u, /* EXT_CSD[183] = 2 (8-bit), R1b */
+ 	    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
+@@ -859,7 +876,9 @@
+ 		}
+ 		uint8_t hc = hc_rd8(SDHCI_HOST_CONTROL);
+ 		hc_wr8(SDHCI_HOST_CONTROL, (uint8_t)(hc | SDHCI_HC_WIDTH_8));
++		BP_STAGE("emmc: bus8 ok");
+ 	} else {
++		BP_STAGE("emmc: bus8 failed");
+ 		printf("R11 eMMC: bus width switch failed %d\n", error);
+ 	}
+ 	error = emmc_cmd(6, 0x03b90100u, /* EXT_CSD[185] = 1 (HS timing), R1b */
+@@ -876,19 +895,11 @@
+ 		/* High speed: base/2, capped at 52 MHz via the field. */
+ 		uint32_t field = su.base_mhz ? (su.base_mhz * 1000u / 2u) / 52000u : 0u;
+ 		emmc_clock_set(MIN(field, 0xffu));
++		BP_STAGE("emmc: hs ok");
+ 		printf("R11 eMMC: high speed, clk ~%u kHz\n", emmc_clock_khz());
+ 	} else {
+ 		printf("R11 eMMC: high speed switch failed %d\n", error);
+ 	}
+-
+-	bzero(ext_csd, sizeof(ext_csd));
+-	error = emmc_cmd(8, su.rca << 16, /* SEND_EXT_CSD, R1 + 512B read */
+-	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
+-	    resp, ext_csd, 1);
+-	if (error) {
+-		BP_STAGE("emmc: CMD8 extcsd failed");
+-		return error;
+-	}
+ 	uint32_t sec_count = (uint32_t)ext_csd[212] | (uint32_t)ext_csd[213] << 8 |
+ 	    (uint32_t)ext_csd[214] << 16 | (uint32_t)ext_csd[215] << 24;
+ 	printf("R11 eMMC: ext_csd rev %u sec_count %u (%u MiB)\n",

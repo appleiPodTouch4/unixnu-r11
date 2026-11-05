@@ -45,6 +45,18 @@ zzz-emmc-pwron.patch
 zzz-emmc-volt.patch
 # Reset CORE_VENDOR_SPEC to its POR value (clears HS400 select-in) + publish RESPONSE.
 zzz-emmc-por.patch
+# Select the card (CMD7) before CMD6; fresh busy deadlines; report CMD7 error.
+zzz-emmc-cmd7.patch
+# CMD7 without busy (R48) + CMD13 status readback.
+zzz-emmc-cmd13.patch
+# Read EXT_CSD in 1-bit before switching width/timing; report each bus change.
+zzz-emmc-extcsd.patch
+# Wait-point markers so a timeout names the step (eeC0..eeC4).
+zzz-emmc-marker.patch
+# Tolerate a missing Transfer Complete on single-block PIO reads (SWRST_DAT + verify).
+zzz-emmc-txc.patch
+# Raise the card clock to 1 MHz before the first data transfer.
+zzz-emmc-fastclk.patch
 component:XnuPrelink/patches/xnu-8796.101.5-security-init.patch
 component:XnuPrelink/patches/xnu-8796.101.5-sparse-index.patch
 # Host-toolchain workaround, not a behaviour change: osfmk/ipc/mach_port.c

@@ -1,0 +1,77 @@
+# R11: select the card (CMD7) before issuing CMD6.
+#
+# boot-irq36 finally showed the failing step on the panel:
+#   emmc: probe hit -> emmc: cmd1 40ff8080 -> emmc: CMD7 failed -> init failed 50
+# so CMD1, CMD2 and CMD3 all succeed and the probe dies at SELECT_CARD.
+#
+# The cause is the command order. After CMD3 the card is in Stand-by: an RCA has
+# been assigned but the card is not selected. CMD6 (SWITCH) is only valid in
+# Transfer state -- that is, after CMD7 has selected the card -- and the driver was
+# issuing two CMD6 calls (8-bit bus, HS timing) in Stand-by, then CMD7. Driving a
+# card through an illegal state and then failing the next command is exactly what
+# this looks like, so CMD7 now comes first, followed by the two best-effort CMD6
+# calls and then CMD8/EXT_CSD for the capacity.
+#
+# Two smaller fixes in the same area: the busy-wait after each CMD6 used the
+# deadline captured at the top of the probe, which has long expired by then, so it
+# never actually waited; each now takes a fresh 200 ms deadline. And a failed CMD7
+# now reports its error code and RCA on the panel instead of a bare "CMD7 failed".
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -811,12 +811,29 @@
+ 		return error;
+ 	}
+ 
+-	/* 8-bit bus while still slow, then high speed. Both best effort. */
++	/*
++	 * boot-irq37: select the card before touching CMD6. After CMD3 the card is in
++	 * Stand-by -- an RCA is assigned but the card is not selected -- and CMD6
++	 * (SWITCH) is only valid in Transfer state, i.e. after CMD7. boot-irq36 issued
++	 * two CMD6 calls in Stand-by and then failed at CMD7, which is the expected
++	 * consequence of driving the card through an illegal state rather than a
++	 * defect in CMD7 itself.
++	 */
++	error = emmc_cmd(7, su.rca << 16, SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
++	    resp, NULL, 0);
++	if (error) {
++		char line[56];
++		snprintf(line, sizeof(line), "emmc: CMD7 err %d rca %x", error, su.rca);
++		BP_STAGE(line);
++		return error;
++	}
++	/* Now in Transfer state: 8-bit bus, then high speed. Both best effort. */
+ 	error = emmc_cmd(6, 0x03b70200u, /* EXT_CSD[183] = 2 (8-bit), R1b */
+ 	    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
+ 	if (!error) {
++		uint64_t busy = timeout_ns(200ull * NSEC_PER_MSEC);
+ 		while (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_DAT0_LOW) {
+-			if (!wait_deadline(deadline)) {
++			if (!wait_deadline(busy)) {
+ 				break;
+ 			}
+ 		}
+@@ -828,8 +845,9 @@
+ 	error = emmc_cmd(6, 0x03b90100u, /* EXT_CSD[185] = 1 (HS timing), R1b */
+ 	    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
+ 	if (!error) {
++		uint64_t busy = timeout_ns(200ull * NSEC_PER_MSEC);
+ 		while (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_DAT0_LOW) {
+-			if (!wait_deadline(deadline)) {
++			if (!wait_deadline(busy)) {
+ 				break;
+ 			}
+ 		}
+@@ -843,13 +861,6 @@
+ 		printf("R11 eMMC: high speed switch failed %d\n", error);
+ 	}
+ 
+-	/* Select the card, then read EXT_CSD for the capacity. */
+-	error = emmc_cmd(7, su.rca << 16, SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX,
+-	    resp, NULL, 0);
+-	if (error) {
+-		BP_STAGE("emmc: CMD7 failed");
+-		return error;
+-	}
+ 	bzero(ext_csd, sizeof(ext_csd));
+ 	error = emmc_cmd(8, su.rca << 16, /* SEND_EXT_CSD, R1 + 512B read */
+ 	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,

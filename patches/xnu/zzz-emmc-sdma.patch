@@ -1,0 +1,111 @@
+# R11: move the EXT_CSD read with SDMA instead of draining the PIO buffer.
+#
+# boot-irq41 and boot-irq42 both read EXT_CSD as all zeros, and boot-irq42 showed that
+# it is not a clock-rate problem: at 1 MHz a 512-byte block takes 4 ms, well inside the
+# controller's data timeout, and the result was still "rev 0 sec 0". The command phase
+# is known good (C0..C3 all pass, the buffer is "read"), so the suspicion is the PIO
+# buffer path itself on this controller.
+#
+# SDMA bypasses it: the controller writes the payload straight into memory, so nothing
+# depends on the FIFO or on Buffer Read Ready ordering. ext_csd is a local array in
+# wired kernel memory, so pmap_kextract yields a physical address the controller can
+# use, and the transfer mode gets DMA Enable instead of PIO.
+#
+# The patch also reports what actually landed: the number of non-zero bytes in the
+# 512-byte buffer and EXT_CSD[194]. An all-zero buffer with nz=0 says the controller
+# never wrote anything; nz>0 with a plausible revision says the read worked and the
+# remaining defect is elsewhere.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -92,6 +92,10 @@
+ #define SDHCI_COMMAND          0x0e
+ #define SDHCI_RESPONSE         0x10
+ #define SDHCI_BUFFER           0x20
++/* boot-irq43: SDMA System Address (0x00..0x03). Set emmc_dma_phys before a data
++ * command to move the payload with SDMA instead of draining the PIO buffer. */
++#define SDHCI_DMA_ADDRESS      0x00
++static uint32_t emmc_dma_phys;
+ #define SDHCI_PRESENT_STATE    0x24
+ #define SDHCI_HOST_CONTROL     0x28
+ #define SDHCI_CLOCK_CONTROL    0x2c
+@@ -398,10 +402,14 @@
+ 		if (error) {
+ 			return error;
+ 		}
++		if (emmc_dma_phys) {
++			hc_wr(SDHCI_DMA_ADDRESS, emmc_dma_phys);
++		}
+ 		hc_wr16(SDHCI_BLOCK_SIZE, EMMC_BLOCK);
+ 		hc_wr16(SDHCI_BLOCK_COUNT, (uint16_t)blocks);
+ 		hc_wr16(SDHCI_TRANSFER_MODE,
+ 		    (uint16_t)(SDHCI_TM_READ | SDHCI_TM_BLKCNT_EN |
++		    (emmc_dma_phys ? 0x0001u : 0u) |	/* DMA Enable */
+ 		    (blocks > 1 ? SDHCI_TM_MULTI | SDHCI_TM_AUTO_CMD12 : 0)));
+ 		hc_wr16(SDHCI_INT_STATUS, 0xffffu);
+ 	} else {
+@@ -431,7 +439,22 @@
+ 		resp[2] = hc_rd(SDHCI_RESPONSE + 8);
+ 		resp[3] = hc_rd(SDHCI_RESPONSE + 12);
+ 	}
+-	if (data) {
++	if (data && emmc_dma_phys) {
++		/* SDMA wrote straight into memory: nothing to drain, just wait for the end. */
++		qcom_emmc_lasterr = 0xC5u;
++		error = emmc_wait_int(SDHCI_INT_TX_COMPLETE, deadline, 1);
++		if (error) {
++			uint64_t d = timeout_ns(20ull * NSEC_PER_MSEC);
++			hc_wr8(SDHCI_SOFTWARE_RESET, 0x04u);	/* SWRST_DAT */
++			while (hc_rd8(SDHCI_SOFTWARE_RESET) & 0x04u) {
++				if (!wait_deadline(d)) {
++					break;
++				}
++			}
++			hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++			qcom_emmc_lasterr = 0xCC05u;
++		}
++	} else if (data) {
+ 		for (uint32_t b = 0; b < blocks; b++) {
+ 			uint32_t *out = (uint32_t *)(data + (uint64_t)b * EMMC_BLOCK);
+ 			qcom_emmc_lasterr = 0xC3u;
+@@ -895,9 +918,41 @@
+ 	BP_STAGE("emmc: clk 1mhz");
+ 
+ 	bzero(ext_csd, sizeof(ext_csd));
++	/*
++	 * boot-irq43: PIO reads of EXT_CSD came back as zeros even after the clock was
++	 * raised to 1 MHz (boot-irq41 rev 0 / boot-irq42 rev 0). Move the same 512-byte
++	 * read with SDMA instead: the controller writes straight to memory, which does
++	 * not depend on the PIO buffer path at all. ext_csd is a local array in wired
++	 * kernel memory, so pmap_kextract gives a physical address the controller can
++	 * use, and the byte count below says what actually landed.
++	 */
++	{
++		/*
++		 * pmap_kextract() is a kernel-internal vm/pmap.h entry that the SDK copy of
++		 * that header does not declare (the symbol is present in the kernel), so it
++		 * is declared here rather than at file scope.
++		 */
++		extern paddr_t pmap_kextract(vm_map_address_t);
++		emmc_dma_phys = (uint32_t)pmap_kextract((vm_map_address_t)ext_csd);
++	}
+ 	error = emmc_cmd(8, su.rca << 16, /* SEND_EXT_CSD, R1 + 512B read */
+ 	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
+ 	    resp, ext_csd, 1);
++	emmc_dma_phys = 0;
++	{
++		unsigned nz = 0;
++		for (unsigned i = 0; i < sizeof(ext_csd); i++) {
++			if (ext_csd[i]) {
++				nz++;
++			}
++		}
++		{
++			char line[64];
++			snprintf(line, sizeof(line), "emmc: dma nz %u rev %u",
++			    nz, ext_csd[194]);
++			BP_STAGE(line);
++		}
++	}
+ 	if (error) {
+ 		BP_STAGE("emmc: CMD8 extcsd failed");
+ 		return error;
