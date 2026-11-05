@@ -397,6 +397,13 @@ static void draw(unsigned now) {
       qcom_emmc_stage,(int)qcom_emmc_err,(unsigned long long)qcom_emmc_blocks,
       &qcom_emmc_lasterr ? qcom_emmc_lasterr : 0u,
       &qcom_emmc_probe ? qcom_emmc_probe : 0u);
+    /* boot-irq45: r1/ext live on this row rather than their own: row 25 sits inside the
+     * kernel console area and the console text painted over it (boot-irq44's photograph
+     * showed no EMMC3 row at all). r1 = err<<16 | sig<<8, nz = nonzero bytes of the
+     * LBA 1 read, ext = EXT_CSD revision << 8 | sector-count-present. */
+    snprintf(b+strlen(b),sizeof(b)-strlen(b)," r1=%06x nz=%u sig=%u ext=%04x",
+      qcom_emmc_r1 & 0xffffffu, qcom_emmc_r1 & 0xffffu,
+      (qcom_emmc_r1 >> 16) & 1u, qcom_emmc_ext & 0xffffu);
     line(27,b,0xffffc060);
     if (&sirius_emmc_oprobe) {
       snprintf(b,sizeof(b),"EMMC2 vspec=%04x pwrctl=%04x r=%08x",
@@ -404,10 +411,6 @@ static void draw(unsigned now) {
         &sirius_emmc_pwrctl ? sirius_emmc_pwrctl : 0u,
         &sirius_emmc_resp ? sirius_emmc_resp : 0u);
       line(26,b,0xffffc060);
-      snprintf(b,sizeof(b),"EMMC3 r1=%06x ext=%04x sig=%u nz=%u",
-        qcom_emmc_r1 & 0xffffffu, qcom_emmc_ext & 0xffffu,
-        (qcom_emmc_r1 >> 16) & 1u, qcom_emmc_r1 & 0xffffu);
-      line(25,b,0xffffc060);
     }
   }
   __asm__ volatile("mrs %0,tcr_el1" : "=r"(tcr));

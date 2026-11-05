@@ -414,7 +414,10 @@ kernel_args = [
   # irq44: boot_progress_stage() is best-effort (try-lock) and dropped irq43's CMD17
   # result, so the same facts now go into plain globals printed on their own row:
   # EMMC3 r1=<err|sig|nz> ext=<rev|has_sec>.
-  "sheng-build-tag=irq44",
+  # irq45: the new EMMC3 row landed on row 25, which is inside the kernel console area
+  # and was painted over (irq44's photo has no EMMC3 row). r1/ext/nz/sig now ride on the
+  # EMMC row itself, on row 27.
+  "sheng-build-tag=irq45",
   # boot-irq11b.img was this list + this line on the irq11 kernel; from irq12 on
   # it is part of the main line: the timer handler also calls rtclock_intr(0),
   # because without it the first tick only counts and re-arms CNTV_CVAL, XNU's
