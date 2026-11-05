@@ -114,6 +114,8 @@ extern volatile unsigned int qcom_emmc_probe __attribute__((weak_import));
 extern volatile unsigned int sirius_emmc_oprobe __attribute__((weak_import));
 extern volatile unsigned int sirius_emmc_pwrctl __attribute__((weak_import));
 extern volatile unsigned int sirius_emmc_resp __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_r1 __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_ext __attribute__((weak_import));
 // The panic screen (scripts/xnu-panic-screen.c) also copies the formatted panic message here (first panic only, NUL-terminated):
 // a panic on a secondary core parks just that core, the next swap paints over the panic screen, and the live banner keeps the text.
 char boot_progress_panic_text[256];
@@ -402,6 +404,10 @@ static void draw(unsigned now) {
         &sirius_emmc_pwrctl ? sirius_emmc_pwrctl : 0u,
         &sirius_emmc_resp ? sirius_emmc_resp : 0u);
       line(26,b,0xffffc060);
+      snprintf(b,sizeof(b),"EMMC3 r1=%06x ext=%04x sig=%u nz=%u",
+        qcom_emmc_r1 & 0xffffffu, qcom_emmc_ext & 0xffffu,
+        (qcom_emmc_r1 >> 16) & 1u, qcom_emmc_r1 & 0xffffu);
+      line(25,b,0xffffc060);
     }
   }
   __asm__ volatile("mrs %0,tcr_el1" : "=r"(tcr));

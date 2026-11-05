@@ -411,7 +411,10 @@ kernel_args = [
   # path is proved with a payload that has a signature: CMD17 on LBA 1 must return the
   # GPT header starting with "EFI PART". The panel reports r1 e/nz/sig plus the EXT_CSD
   # revision for comparison.
-  "sheng-build-tag=irq43",
+  # irq44: boot_progress_stage() is best-effort (try-lock) and dropped irq43's CMD17
+  # result, so the same facts now go into plain globals printed on their own row:
+  # EMMC3 r1=<err|sig|nz> ext=<rev|has_sec>.
+  "sheng-build-tag=irq44",
   # boot-irq11b.img was this list + this line on the irq11 kernel; from irq12 on
   # it is part of the main line: the timer handler also calls rtclock_intr(0),
   # because without it the first tick only counts and re-arms CNTV_CVAL, XNU's

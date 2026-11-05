@@ -1,0 +1,46 @@
+# R11: give the CMD17 and EXT_CSD results their own panel words.
+#
+# boot-irq43 added a CMD17 read of LBA 1 whose result was published through
+# boot_progress_stage(), and the photograph came back without it: boot_progress_stage()
+# takes a try-lock, the mountroot retry loop competes for that lock once per second,
+# and a stage that loses the race is dropped silently (boot-irq43 lost both "emmc: r1 ..."
+# and "emmc: hs ok"). Diagnostics that matter cannot depend on a best-effort path.
+#
+# Two plain globals carry the same facts instead, and the panel prints them on its own
+# row, where nothing can drop them:
+#   qcom_emmc_r1  = (err << 24) | (sig << 16) | nonzero byte count of the LBA 1 read
+#   qcom_emmc_ext = (EXT_CSD[194] << 8) | (sector count non-zero)
+# The stage lines are kept so the history still reads well when it does win the lock.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -80,6 +80,13 @@
+  * card drove the response path and the controller sampled something, which would
+  * move the diagnosis from "silent card" to "bad sampling". */
+ volatile unsigned int sirius_emmc_resp;
++/* boot-irq44: the CMD17/EXT_CSD results in their own words. boot_progress_stage() takes
++ * a try-lock, and the mountroot retry loop competes for it, so stages can be dropped
++ * silently -- boot-irq43 lost both the "emmc: r1 ..." and "emmc: hs ok" lines that way.
++ * These are plain stores and cannot be lost.
++ *   qcom_emmc_r1  = (err<<24) | (sig<<16) | nonzero byte count of the LBA 1 read
++ *   qcom_emmc_ext = (EXT_CSD[194] << 8) | (sector count > 0 ? 1 : 0) */
++volatile unsigned int qcom_emmc_r1, qcom_emmc_ext;
+ #define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage = __LINE__; sirius_emmc_step = __LINE__; } while (0)
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -918,6 +925,8 @@
+ 		sig = (gpt_blk[0] == 'E' && gpt_blk[1] == 'F' && gpt_blk[2] == 'I' &&
+ 		    gpt_blk[3] == ' ' && gpt_blk[4] == 'P' && gpt_blk[5] == 'A' &&
+ 		    gpt_blk[6] == 'R' && gpt_blk[7] == 'T');
++		qcom_emmc_r1 = ((unsigned)(rerr & 0xff) << 24) |
++		    ((unsigned)(sig & 1) << 16) | (gnz & 0xffffu);
+ 		{
+ 			char line[64];
+ 			snprintf(line, sizeof(line), "emmc: r1 e%d nz %u sig %d",
+@@ -982,6 +991,7 @@
+ 	    (uint32_t)ext_csd[214] << 16 | (uint32_t)ext_csd[215] << 24;
+ 	printf("R11 eMMC: ext_csd rev %u sec_count %u (%u MiB)\n",
+ 	    ext_csd[194], sec_count, sec_count >> 11);
++	qcom_emmc_ext = ((unsigned)(ext_csd[194] & 0xff) << 8) | (sec_count ? 1u : 0u);
+ 	{
+ 		/* The panel copy of the same fact: a plausible revision (5..8) and a sector
+ 		 * count near the part's capacity prove the transfer really delivered EXT_CSD
