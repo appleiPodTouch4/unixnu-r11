@@ -1,0 +1,60 @@
+# R11: read the GPT header with CMD17 to prove the data path with a known signature.
+#
+# boot-irq41 and boot-irq42 both read EXT_CSD as 512 zero bytes, with every command step
+# reporting success (C0..C3 pass, the buffer is "read"). Two explanations remain: either
+# the PIO data path never delivers payload, or EXT_CSD specifically comes back empty.
+# Guessing further would not separate them, so this patch reads something whose content
+# is recognisable: LBA 1 of the device, the GPT header, which begins with the ASCII
+# bytes "EFI PART".
+#
+# The panel gets "emmc: r1 e<err> nz <nonzero-byte-count> sig <0|1>":
+#   sig 1          the data path works, and EXT_CSD's zeros are specific to that command
+#   nz 0, sig 0    nothing is delivered at all -- the data path itself is broken and the
+#                  next step is SDMA, not more probing
+#   nz > 0, sig 0  bytes arrive but not what we expect: a byte-order or address-mode
+#                  problem rather than a dead path
+#
+# The read uses a static 512-byte buffer so the payload never lands on the stack, and it
+# runs before the EXT_CSD read, which is kept so the two results can be compared in a
+# single photograph.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -894,6 +894,38 @@
+ 	emmc_clock_set(25u);
+ 	BP_STAGE("emmc: clk 1mhz");
+ 
++	/*
++	 * boot-irq43: prove the data path with a payload we can recognise before trusting
++	 * EXT_CSD again. LBA 1 holds the GPT header, which begins with the ASCII bytes
++	 * "EFI PART". If PIO delivers real content here, the all-zero EXT_CSD is specific
++	 * to that command; if this reads zeros as well, the data path itself is broken and
++	 * the next step is SDMA rather than more guessing. A static buffer keeps the
++	 * 512-byte payload off the stack.
++	 */
++	{
++		static uint8_t gpt_blk[512];
++		uint32_t gr[4] = { 0, 0, 0, 0 };
++		unsigned gnz = 0;
++		int sig;
++		int rerr = emmc_cmd(17, 1u, /* READ_SINGLE_BLOCK, LBA 1 */
++		    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
++		    gr, gpt_blk, 1);
++		for (unsigned i = 0; i < sizeof(gpt_blk); i++) {
++			if (gpt_blk[i]) {
++				gnz++;
++			}
++		}
++		sig = (gpt_blk[0] == 'E' && gpt_blk[1] == 'F' && gpt_blk[2] == 'I' &&
++		    gpt_blk[3] == ' ' && gpt_blk[4] == 'P' && gpt_blk[5] == 'A' &&
++		    gpt_blk[6] == 'R' && gpt_blk[7] == 'T');
++		{
++			char line[64];
++			snprintf(line, sizeof(line), "emmc: r1 e%d nz %u sig %d",
++			    rerr, gnz, sig);
++			BP_STAGE(line);
++		}
++	}
++
+ 	bzero(ext_csd, sizeof(ext_csd));
+ 	error = emmc_cmd(8, su.rca << 16, /* SEND_EXT_CSD, R1 + 512B read */
+ 	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,

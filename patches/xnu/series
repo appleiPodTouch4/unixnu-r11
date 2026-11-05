@@ -57,6 +57,8 @@ zzz-emmc-marker.patch
 zzz-emmc-txc.patch
 # Raise the card clock to 1 MHz before the first data transfer.
 zzz-emmc-fastclk.patch
+# CMD17 read of LBA 1 (GPT header) to prove the data path with a signature.
+zzz-emmc-cmd17.patch
 component:XnuPrelink/patches/xnu-8796.101.5-security-init.patch
 component:XnuPrelink/patches/xnu-8796.101.5-sparse-index.patch
 # Host-toolchain workaround, not a behaviour change: osfmk/ipc/mach_port.c
