@@ -1,0 +1,67 @@
+# R11: move the LBA-1 read with SDMA and publish why PIO saw only one word.
+#
+# boot-irq51 gated every buffer read on Buffer Read Enable and the result did not change:
+# LBA 1 still read 0x4546492045464920 ("EFI " twice) and LBA 0 still read zeros. A block that
+# latches exactly one word, identically at 1 MHz and 4.2 MHz, is not a drain-rate problem --
+# it is a data phase that never ran, with the port handing back whatever the bootloader's own
+# eMMC read left in the buffer ("EFI " is the first word of the GPT header, which is exactly
+# what ABL reads when it scans partitions).
+#
+# Three instruments go in at once, because one boot should settle it:
+#   emmc_dma_phys  the SDMA system address for the 512-byte block, so the controller writes
+#                  straight to memory and the FIFO port is out of the picture entirely;
+#   qcom_emmc_bs   BLOCK_SIZE read back after it was written (512, or it tells us otherwise);
+#   qcom_emmc_bc   BLOCK_COUNT read back (1);
+#   qcom_emmc_dat  PRESENT_STATE bits 20..23 sampled right after CMD17 was issued -- the four
+#                  DAT line levels. If they never move, the card is not sending.
+# pmap_kextract() is declared locally with a plain scalar signature because the SDK copy of
+# vm/pmap.h does not declare it; the symbol itself exists in the kernel.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -96,6 +96,13 @@
+  * the whole first eight bytes are carried instead of four. "EFI PART" reads
+  * 0x4546492050415254; anything else says exactly how the block is misaligned. */
+ volatile unsigned long long qcom_emmc_d1q;
++/* boot-irq52: why the PIO drain saw one word. bs/bc are BLOCK_SIZE/BLOCK_COUNT read back
++ * after they were written, dat is PRESENT_STATE bits 20..23 sampled right after CMD17 was
++ * issued (the four DAT line levels), and sdm reports the SDMA read result. */
++volatile unsigned int qcom_emmc_bs, qcom_emmc_bc, qcom_emmc_dat, qcom_emmc_sdm;
++/* pmap_kextract() is kernel-internal and the SDK copy of vm/pmap.h does not declare it;
++ * the symbol exists in the kernel, so declare it here with a plain scalar signature. */
++extern unsigned long long pmap_kextract(unsigned long);
+ #define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage = __LINE__; sirius_emmc_step = __LINE__; } while (0)
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -419,6 +426,8 @@
+ 		}
+ 		hc_wr16(SDHCI_BLOCK_SIZE, EMMC_BLOCK);
+ 		hc_wr16(SDHCI_BLOCK_COUNT, (uint16_t)blocks);
++		qcom_emmc_bs = hc_rd16(SDHCI_BLOCK_SIZE);
++		qcom_emmc_bc = hc_rd16(SDHCI_BLOCK_COUNT);
+ 		hc_wr16(SDHCI_TRANSFER_MODE,
+ 		    (uint16_t)(SDHCI_TM_READ | SDHCI_TM_BLKCNT_EN |
+ 		    (blocks > 1 ? SDHCI_TM_MULTI | SDHCI_TM_AUTO_CMD12 : 0)));
+@@ -428,6 +437,9 @@
+ 	}
+ 	hc_wr(SDHCI_ARGUMENT, arg);
+ 	hc_wr16(SDHCI_COMMAND, SDHCI_CMD(idx, flags));
++	if (data) {
++		qcom_emmc_dat = (hc_rd(SDHCI_PRESENT_STATE) >> 20) & 0xfu;
++	}
+ 
+ 	qcom_emmc_lasterr = 0xC2u;
+ 	error = emmc_wait_int(SDHCI_INT_CMD_COMPLETE, deadline, 1);
+@@ -956,7 +968,12 @@
+ 		uint32_t gr[4] = { 0, 0, 0, 0 };
+ 		unsigned gnz = 0;
+ 		int sig;
+-		int rerr = emmc_cmd(17, 1u, /* READ_SINGLE_BLOCK, LBA 1 */
++		int rerr;
++		/* boot-irq52: move this block with SDMA -- the controller writes it into memory
++		 * and never involves the FIFO port that returned one word 128 times. */
++		emmc_dma_phys = (uint32_t)pmap_kextract((unsigned long)gpt_blk);
++		qcom_emmc_sdm = emmc_dma_phys ? 1u : 0u;
++		rerr = emmc_cmd(17, 1u, /* READ_SINGLE_BLOCK, LBA 1 */
+ 		    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
+ 		    gr, gpt_blk, 1);
+ 		for (unsigned i = 0; i < sizeof(gpt_blk); i++) {
