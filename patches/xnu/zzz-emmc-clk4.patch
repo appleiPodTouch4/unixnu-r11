@@ -1,0 +1,56 @@
+# R11: run the data reads at 4 MHz and reset the DAT path before each one.
+#
+# boot-irq49 read LBA 1 as 0x4546492045464920 -- the ASCII bytes "EFI EFI ", i.e. the first
+# four bytes repeated. That is not a wrong block or a byte shift; it is the buffer handing
+# back the same word twice, which happens when the FIFO is drained before the rest of the
+# block has been clocked in. At 1 MHz a 512-byte block takes 4 ms, and the driver reads all
+# 128 words immediately after the first Buffer Read Ready.
+#
+# Two changes:
+#  1. the card clock goes to 4.2 MHz (divider field 6 -> N = 24 -> 200 MHz/(2*24)), still
+#     inside default-speed timing, which puts a 512-byte block at about 1 ms;
+#  2. the DAT path is reset (SWRST_DAT) and the interrupt status cleared before each CMD17,
+#     because a transfer that never reported Transfer Complete leaves the data logic latched
+#     and would make the next read start from a stale state.
+#
+# The signature dump stays, so the panel says directly whether the block now reads
+# 0x4546492050415254 ("EFI PART").
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -907,8 +907,15 @@
+ 	 * Divider field 25 gives N = 25*4 = 100, i.e. 200 MHz / (2*100) = 1 MHz, which
+ 	 * puts a 512-byte block at 4 ms and still inside default-speed timing.
+ 	 */
+-	emmc_clock_set(25u);
+-	BP_STAGE("emmc: clk 1mhz");
++	/*
++	 * boot-irq50: field 25 gave 1 MHz; at that rate a 512-byte block needs 4 ms and the
++	 * first word of the block came back twice ("EFI EFI "), which is what happens when
++	 * the FIFO is drained before the rest of the block has arrived. Field 6 gives
++	 * N = 24, i.e. 200 MHz/(2*24) = 4.2 MHz, still inside default-speed timing, and puts
++	 * a block at ~1 ms.
++	 */
++	emmc_clock_set(6u);
++	BP_STAGE("emmc: clk 4mhz");
+ 
+ 	/*
+ 	 * boot-irq43: prove the data path with a payload we can recognise before trusting
+@@ -920,6 +927,18 @@
+ 	 */
+ 	{
+ 		static uint8_t gpt_blk[512];
++		/* Start the data path from a known state: a previous transfer that never
++		 * reported Transfer Complete leaves DAT logic latched. */
++		{
++			uint64_t d0 = timeout_ns(20ull * NSEC_PER_MSEC);
++			hc_wr8(SDHCI_SOFTWARE_RESET, 0x04u);	/* SWRST_DAT */
++			while (hc_rd8(SDHCI_SOFTWARE_RESET) & 0x04u) {
++				if (!wait_deadline(d0)) {
++					break;
++				}
++			}
++			hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++		}
+ 		uint32_t gr[4] = { 0, 0, 0, 0 };
+ 		unsigned gnz = 0;
+ 		int sig;
