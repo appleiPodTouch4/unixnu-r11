@@ -419,7 +419,9 @@ kernel_args = [
   # EMMC row itself, on row 27.
   # irq46: the eMMC verdict (r1/nz/sig/ext) moves onto the top status line, which every
   # photograph of the panel already captures; the driver row stays for the rest.
-  "sheng-build-tag=irq46",
+  # irq47: appended to the status line the verdict ran past the last column and was cut
+  # off, so it now heads its own line: "emmc r1=.. x=.. s=.. n=.. | UFS ...".
+  "sheng-build-tag=irq47",
   # boot-irq11b.img was this list + this line on the irq11 kernel; from irq12 on
   # it is part of the main line: the timer handler also calls rtclock_intr(0),
   # because without it the first tick only counts and re-arms CNTV_CVAL, XNU's
