@@ -118,6 +118,10 @@ extern volatile unsigned int qcom_emmc_r1 __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_ext __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_d1 __attribute__((weak_import));
 extern volatile unsigned long long qcom_emmc_d1q __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_bs __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_bc __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_dat __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_sdm __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_d0 __attribute__((weak_import));
 // The panic screen (scripts/xnu-panic-screen.c) also copies the formatted panic message here (first panic only, NUL-terminated):
 // a panic on a secondary core parks just that core, the next swap paints over the panic screen, and the live banner keeps the text.
@@ -447,7 +451,14 @@ static void draw(unsigned now) {
     (qcom_emmc_r1 >> 16) & 1u, qcom_emmc_r1 & 0xffffu,
     qcom_emmc_d1q, qcom_emmc_d0 & 0xffffffu);
   line(2,b,0xffffffff);
-  snprintf(b,sizeof(b),"TCR=%llx TTBR0=%llx TTBR1=%llx SCTLR=%llx",tcr,ttbr0,ttbr1,sctlr); line(3,b,0xffffffff);
+  /* boot-irq54: the data-phase instruments get row 3 to themselves, in place of the
+   * static TCR/TTBR/SCTLR text. bs/bc = BLOCK_SIZE/BLOCK_COUNT read back, dat = the four
+   * DAT line levels sampled right after CMD17, sdm = SDMA address valid. Earlier attempts
+   * (row 25, row 4) were painted over by the console and by the CPU line. */
+  snprintf(b,sizeof(b),"emmc2 bs=%u bc=%u dat=%x sdm=%u",
+    qcom_emmc_bs & 0xffffu, qcom_emmc_bc & 0xffffu,
+    qcom_emmc_dat & 0xfu, qcom_emmc_sdm & 1u);
+  line(3,b,0xffffffff);
   // Row 4 carried the root-match counters (fnd/cand/fam/passes). They answered
   // their question and are now dead: the pass that publishes the DT nodes is not
   // a match on a service named "device-tree" (nothing is), so every one of those

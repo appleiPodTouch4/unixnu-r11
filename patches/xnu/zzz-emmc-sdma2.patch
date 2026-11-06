@@ -24,7 +24,7 @@
 +/* boot-irq52: SDMA needs a physical address; pmap_kextract() is kernel-internal and the
 + * SDK copy of vm/pmap.h does not declare it, so it is declared here with a scalar
 + * signature, and the scratch address for the next data command lives here. */
-+extern unsigned long long pmap_kextract(unsigned long);
++/* ml_static_vtop() (machine_routines) turns the kernel virtual address into a physical one. */
 +static uint32_t emmc_dma_phys;
  #define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage = __LINE__; sirius_emmc_step = __LINE__; } while (0)
  
@@ -56,7 +56,7 @@
 +		int rerr;
 +		/* boot-irq52: SDMA move -- the FIFO port returned one word 128 times, so take the
 +		 * controller's own DMA path into memory instead. */
-+		emmc_dma_phys = (uint32_t)pmap_kextract((unsigned long)gpt_blk);
++		emmc_dma_phys = (uint32_t)ml_static_vtop((addr64_t)(uintptr_t)gpt_blk);
 +		qcom_emmc_sdm = emmc_dma_phys ? 1u : 0u;
 +		rerr = emmc_cmd(17, 1u, /* READ_SINGLE_BLOCK, LBA 1 */
  		    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
