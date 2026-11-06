@@ -67,6 +67,8 @@ zzz-emmc-lba0.patch
 zzz-emmc-d1q.patch
 # 4 MHz data reads + SWRST_DAT before each CMD17.
 zzz-emmc-clk4.patch
+# Gate each PIO buffer read on PRESENT_STATE Buffer Read Enable.
+zzz-emmc-bufrdy.patch
 component:XnuPrelink/patches/xnu-8796.101.5-security-init.patch
 component:XnuPrelink/patches/xnu-8796.101.5-sparse-index.patch
 # Host-toolchain workaround, not a behaviour change: osfmk/ipc/mach_port.c

@@ -1,0 +1,40 @@
+# R11: gate every PIO buffer read on Buffer Read Enable.
+#
+# boot-irq49 and boot-irq50 read LBA 1 as 0x4546492045464920 -- "EFI " twice -- and LBA 0 as
+# all zeros, identically at 1 MHz and at 4.2 MHz. The first word of each block is right and
+# every word after it repeats it: the buffer port hands back what it last latched when read
+# faster than the card clock advances it.
+#
+# PRESENT_STATE bit 11 (Buffer Read Enable) is 0 exactly when nothing is left to read, so the
+# drain loop waits for it before each word. That is the PIO sequence the SD Host Controller
+# spec describes.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -108,6 +108,9 @@
+ #define SDHCI_COMMAND          0x0e
+ #define SDHCI_RESPONSE         0x10
+ #define SDHCI_BUFFER           0x20
++/* boot-irq51: PRESENT_STATE bit 11 -- Buffer Read Enable, 0 when the controller has no data
++ * left to hand out. The only correct gate for a PIO read. */
++#define SDHCI_BUF_READ_EN      0x0800u
+ #define SDHCI_PRESENT_STATE    0x24
+ #define SDHCI_HOST_CONTROL     0x28
+ #define SDHCI_CLOCK_CONTROL    0x2c
+@@ -456,6 +459,17 @@
+ 				return error;
+ 			}
+ 			for (uint32_t w = 0; w < EMMC_BLOCK / 4; w++) {
++				/* boot-irq51: read only while the buffer says it has data; reading 128 words back to
++				 * back returned the first word every time ("EFI EFI "), because the port hands back
++				 * what it last latched and advances with the card clock, not the CPU. */
++				{
++					uint64_t bw = timeout_ns(200ull * NSEC_PER_MSEC);
++					while (!(hc_rd(SDHCI_PRESENT_STATE) & SDHCI_BUF_READ_EN)) {
++						if (!wait_deadline(bw)) {
++							break;
++						}
++					}
++				}
+ 				out[w] = hc_rd(SDHCI_BUFFER);
+ 			}
+ 		}

@@ -429,7 +429,9 @@ kernel_args = [
   # irq50: "EFI EFI " said the FIFO returns the same word twice -- the block is drained
   # before it has arrived. The card clock goes to 4.2 MHz (220 MHz/(2*24)) and the DAT path
   # is reset before each CMD17.
-  "sheng-build-tag=irq50",
+  # irq51: the PIO drain read the same word 128 times ("EFI EFI ") because it never checked
+  # Buffer Read Enable (PRESENT_STATE bit 11); each word is now gated on it.
+  "sheng-build-tag=irq51",
   # boot-irq11b.img was this list + this line on the irq11 kernel; from irq12 on
   # it is part of the main line: the timer handler also calls rtclock_intr(0),
   # because without it the first tick only counts and re-arms CNTV_CVAL, XNU's
