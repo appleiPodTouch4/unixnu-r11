@@ -1,0 +1,58 @@
+# R11: identify what the successful eMMC data read actually returned.
+#
+# boot-irq47 settled the data-path question: the CMD17 read on LBA 1 returned 512 non-zero
+# bytes (panel "emmc r1=000200 x=00 s=0 n=512"), so payload does arrive -- it simply is
+# not the "EFI PART" GPT header expected at LBA 1.
+#
+# Two facts are needed to say why, and both are cheap to carry:
+#   qcom_emmc_d1 = the first four bytes of that LBA-1 block, so the content can be
+#                  recognised by inspection rather than guessed at;
+#   qcom_emmc_d0 = bytes 510..511 of an LBA-0 read, which must be the MBR signature
+#                  0x55 0xAA if the addressing mode is right. If they are not, the card is
+#                  using byte addressing and arg must be a byte offset, not a block
+#                  number (eMMC 4.x parts default to byte addressing unless the sector
+#                  mode bit was accepted).
+#
+# Both words are plain globals; the panel prints them on the same line as the verdict.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -87,6 +87,11 @@
+  *   qcom_emmc_r1  = (err<<24) | (sig<<16) | nonzero byte count of the LBA 1 read
+  *   qcom_emmc_ext = (EXT_CSD[194] << 8) | (sector count > 0 ? 1 : 0) */
+ volatile unsigned int qcom_emmc_r1, qcom_emmc_ext;
++/* boot-irq48: the LBA-1 read returned 512 non-zero bytes that were not "EFI PART", so
++ * the data path works and the question is now what those bytes are. qcom_emmc_d1 holds
++ * the first four bytes of LBA 1, qcom_emmc_d0 holds bytes 510..511 of LBA 0 (the MBR
++ * signature 0x55AA if the addressing is right). */
++volatile unsigned int qcom_emmc_d1, qcom_emmc_d0;
+ #define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage = __LINE__; sirius_emmc_step = __LINE__; } while (0)
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -927,6 +932,8 @@
+ 		    gpt_blk[6] == 'R' && gpt_blk[7] == 'T');
+ 		qcom_emmc_r1 = ((unsigned)(rerr & 0xff) << 24) |
+ 		    ((unsigned)(sig & 1) << 16) | (gnz & 0xffffu);
++		qcom_emmc_d1 = ((unsigned)gpt_blk[0] << 24) | ((unsigned)gpt_blk[1] << 16) |
++		    ((unsigned)gpt_blk[2] << 8) | (unsigned)gpt_blk[3];
+ 		{
+ 			char line[64];
+ 			snprintf(line, sizeof(line), "emmc: r1 e%d nz %u sig %d",
+@@ -935,6 +942,18 @@
+ 		}
+ 	}
+ 
++	{
++		/* Same read on LBA 0: if the addressing mode is right, bytes 510..511 are the
++		 * MBR signature 0x55 0xAA. */
++		static uint8_t mbr_blk[512];
++		uint32_t mr[4] = { 0, 0, 0, 0 };
++		int merr = emmc_cmd(17, 0u,
++		    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
++		    mr, mbr_blk, 1);
++		qcom_emmc_d0 = ((unsigned)(merr & 0xff) << 16) |
++		    ((unsigned)mbr_blk[510] << 8) | (unsigned)mbr_blk[511];
++	}
++
+ 	bzero(ext_csd, sizeof(ext_csd));
+ 	error = emmc_cmd(8, su.rca << 16, /* SEND_EXT_CSD, R1 + 512B read */
+ 	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,

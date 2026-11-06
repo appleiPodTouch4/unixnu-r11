@@ -61,6 +61,8 @@ zzz-emmc-fastclk.patch
 zzz-emmc-cmd17.patch
 # CMD17/EXT_CSD results in plain globals, immune to stage drops.
 zzz-emmc-numeric.patch
+# LBA-0 read + first bytes of LBA 1, to identify the content and the addressing mode.
+zzz-emmc-lba0.patch
 component:XnuPrelink/patches/xnu-8796.101.5-security-init.patch
 component:XnuPrelink/patches/xnu-8796.101.5-sparse-index.patch
 # Host-toolchain workaround, not a behaviour change: osfmk/ipc/mach_port.c
