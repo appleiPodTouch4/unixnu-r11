@@ -424,7 +424,9 @@ kernel_args = [
   # irq48: n=512 proved the data path works; the block just is not "EFI PART". Row 2 now
   # also carries d1 (first 4 bytes of LBA 1) and d0 (bytes 510..511 of LBA 0, expected
   # 0x55AA) so the content and the addressing mode can both be read off a photo.
-  "sheng-build-tag=irq48",
+  # irq49: d1 was "EFI " but the full "EFI PART" test failed, so eight bytes are carried
+  # instead of four and shown as d1=%016llx: 0x4546492050415254 means the header is intact.
+  "sheng-build-tag=irq49",
   # boot-irq11b.img was this list + this line on the irq11 kernel; from irq12 on
   # it is part of the main line: the timer handler also calls rtclock_intr(0),
   # because without it the first tick only counts and re-arms CNTV_CVAL, XNU's

@@ -1,0 +1,36 @@
+# R11: carry the whole first eight bytes of the LBA-1 block.
+#
+# boot-irq48 came back with "emmc r1=000200 x=00 s=0 n=512 d1=45464920 d0=000000":
+# the block starts with the ASCII bytes "EFI ", so a real GPT header is being read, yet the
+# signature test for the full "EFI PART" failed (s=0) and the LBA-0 read did not end in
+# 0x55AA (d0=000000). Both point at an alignment or offset problem rather than absent
+# data, and four bytes are not enough to tell which.
+#
+# qcom_emmc_d1q now carries eight bytes, so the panel shows the whole signature:
+#   d1=4546492050415254  exactly "EFI PART"
+#   d1=45464920xxxx...   right start, wrong continuation
+#   anything else        a different block than expected
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -92,6 +92,10 @@
+  * the first four bytes of LBA 1, qcom_emmc_d0 holds bytes 510..511 of LBA 0 (the MBR
+  * signature 0x55AA if the addressing is right). */
+ volatile unsigned int qcom_emmc_d1, qcom_emmc_d0;
++/* boot-irq49: d1 showed "EFI " but the signature check for the full "EFI PART" failed, so
++ * the whole first eight bytes are carried instead of four. "EFI PART" reads
++ * 0x4546492050415254; anything else says exactly how the block is misaligned. */
++volatile unsigned long long qcom_emmc_d1q;
+ #define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage = __LINE__; sirius_emmc_step = __LINE__; } while (0)
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -934,6 +938,10 @@
+ 		    ((unsigned)(sig & 1) << 16) | (gnz & 0xffffu);
+ 		qcom_emmc_d1 = ((unsigned)gpt_blk[0] << 24) | ((unsigned)gpt_blk[1] << 16) |
+ 		    ((unsigned)gpt_blk[2] << 8) | (unsigned)gpt_blk[3];
++		qcom_emmc_d1q = 0;
++		for (unsigned i = 0; i < 8; i++) {
++			qcom_emmc_d1q = (qcom_emmc_d1q << 8) | gpt_blk[i];
++		}
+ 		{
+ 			char line[64];
+ 			snprintf(line, sizeof(line), "emmc: r1 e%d nz %u sig %d",

@@ -117,6 +117,7 @@ extern volatile unsigned int sirius_emmc_resp __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_r1 __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_ext __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_d1 __attribute__((weak_import));
+extern volatile unsigned long long qcom_emmc_d1q __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_d0 __attribute__((weak_import));
 // The panic screen (scripts/xnu-panic-screen.c) also copies the formatted panic message here (first panic only, NUL-terminated):
 // a panic on a secondary core parks just that core, the next swap paints over the panic screen, and the live banner keeps the text.
@@ -441,10 +442,10 @@ static void draw(unsigned now) {
    * sector-count-present, s = whether the block began with "EFI PART". */
   /* boot-irq48: row 2 is the eMMC diagnostics line. d1 is the first four bytes of the
    * LBA-1 block, d0 is bytes 510..511 of LBA 0 (0x55AA if block addressing is right). */
-  snprintf(b,sizeof(b),"emmc r1=%06x x=%02x s=%u n=%u d1=%08x d0=%06x",
+  snprintf(b,sizeof(b),"emmc r1=%06x x=%02x s=%u n=%u d1=%016llx d0=%06x",
     qcom_emmc_r1 & 0xffffffu, qcom_emmc_ext & 0xffffu,
     (qcom_emmc_r1 >> 16) & 1u, qcom_emmc_r1 & 0xffffu,
-    qcom_emmc_d1 & 0xffffffffu, qcom_emmc_d0 & 0xffffffu);
+    qcom_emmc_d1q, qcom_emmc_d0 & 0xffffffu);
   line(2,b,0xffffffff);
   snprintf(b,sizeof(b),"TCR=%llx TTBR0=%llx TTBR1=%llx SCTLR=%llx",tcr,ttbr0,ttbr1,sctlr); line(3,b,0xffffffff);
   // Row 4 carried the root-match counters (fnd/cand/fam/passes). They answered
