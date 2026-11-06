@@ -431,7 +431,18 @@ static void draw(unsigned now) {
   bar(0, b, 0xffffffff, visible->reason && !visible->continuous ? BP_BAR_STOP : BP_BAR_LIVE);
   snprintf(b,sizeof(b),"time=%us idle=%us IRQ=%llu monitor=%llu lost=%u root=%d procs=%d free=%u",
     now, now-visible->activity_at, irq_count, thread_count, visible->dropped,
-    native_owner_root_accepted, nprocs, vm_page_free_count); line(1,b,0xffffffff);
+    native_owner_root_accepted, nprocs, vm_page_free_count);
+  // boot-irq46: the eMMC verdict rides on the top status line, which every photograph
+  // already captures, instead of a driver row further down the panel.
+  //   r1 = (err<<16)|(sig<<8) of the CMD17 LBA-1 read, n = its non-zero byte count,
+  //   x  = EXT_CSD revision << 8 | sector-count-present.
+  if (&qcom_emmc_r1) {
+    size_t n = strlen(b);
+    snprintf(b+n,sizeof(b)-n," emmc r1=%06x x=%02x s=%u n=%u",
+      qcom_emmc_r1 & 0xffffffu, qcom_emmc_ext & 0xffffu,
+      (qcom_emmc_r1 >> 16) & 1u, qcom_emmc_r1 & 0xffffu);
+  }
+  line(1,b,0xffffffff);
   snprintf(b,sizeof(b),"%s requests=%llu verified4K=%llu failures=%llu integrity=%u published=%u",
     native_virtio_ready && !native_ufs_blocks_published ? "OFFLINE VIRTIO" : "UFS",
     visible->reads,visible->verified,visible->failures,native_ufs_integrity_failures,native_ufs_blocks_published);
