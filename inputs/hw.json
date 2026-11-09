@@ -675,7 +675,7 @@
   },
   "chosen_bootargs": "rcupdate.rcu_expedited=1",
   "boot_image": {
-    "path": "/Users/mry0000/Desktop/unixnu_r11/ofp_extracted/boot.img",
+    "path": "../ofp_extracted/boot.img",
     "header_version": "0x0",
     "page_size": "0x1000",
     "kernel_size": "0xc6c2b6",
@@ -705,7 +705,7 @@
   },
   "gpt": {
     "gpt_main0.bin": {
-      "path": "/Users/mry0000/Desktop/unixnu_r11/ofp_extracted/gpt_main0.bin",
+      "path": "../ofp_extracted/gpt_main0.bin",
       "entry_count": 72,
       "partitions": [
         {
@@ -1401,7 +1401,7 @@
       ]
     },
     "gpt_main2.bin": {
-      "path": "/Users/mry0000/Desktop/unixnu_r11/ofp_extracted/gpt_main2.bin",
+      "path": "../ofp_extracted/gpt_main2.bin",
       "entry_count": 4,
       "partitions": [
         {

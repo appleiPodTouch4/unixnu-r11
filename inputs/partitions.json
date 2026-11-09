@@ -1,6 +1,6 @@
 {
   "gpt_main0.bin": {
-    "path": "/Users/mry0000/Desktop/unixnu_r11/ofp_extracted/gpt_main0.bin",
+    "path": "../ofp_extracted/gpt_main0.bin",
     "entry_count": 72,
     "partitions": [
       {
@@ -696,7 +696,7 @@
     ]
   },
   "gpt_main2.bin": {
-    "path": "/Users/mry0000/Desktop/unixnu_r11/ofp_extracted/gpt_main2.bin",
+    "path": "../ofp_extracted/gpt_main2.bin",
     "entry_count": 4,
     "partitions": [
       {
