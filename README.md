@@ -133,6 +133,7 @@ kernel-side storage, display, input and power drivers are not written; see
 
 ## Related
 
+* [`docs/emmc-test-log.md`](docs/emmc-test-log.md) — irq50–irq94 eMMC/USB bring-up test table.
 * `porting.toml` — the porting record: inputs, findings, limits, next actions.
 * [`../uefi-r11`](../uefi-r11) — the Mu-Silicium platform package for this board.
 * `soc/` — the SDM660 layer vendored in this repository so a clone builds without siblings\n  (`../UniXNU-sdm660-common` is the same content, kept for a future published repository).
