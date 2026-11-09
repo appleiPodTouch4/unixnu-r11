@@ -1,0 +1,62 @@
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 0ebe1bb..2595ccb 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -465,12 +465,21 @@ emmc_gcc_400k(void)
+ 		return -1;
+ 	}
+ 	/* Stop the card clock before touching its root. */
++	BP_STAGE("emmc: gcc stop");
+ 	hc_wr16(SDHCI_CLOCK_CONTROL, 0);
+ 	for (unsigned i = 0; i < 10000; i++) {
+ 		if (!(hc_rd16(SDHCI_CLOCK_CONTROL) & 0x0005u)) {
+ 			break;
+ 		}
+ 	}
++	/* clover mode 6: reset CMD+DATA (0x06), never RESET_ALL, before the root clock. */
++	hc_wr8(SDHCI_SOFTWARE_RESET, 0x06u);
++	for (unsigned i = 0; i < 10000; i++) {
++		if (!(hc_rd8(SDHCI_SOFTWARE_RESET) & 0x06u)) {
++			break;
++		}
++	}
++	BP_STAGE("emmc: gcc rst");
+ 	*(volatile uint32_t *)(gcc + 0x16004) |= 1u;
+ 	*(volatile uint32_t *)(gcc + 0x16008) |= 1u;
+ 	*(volatile uint32_t *)(gcc + 0x16034) =
+@@ -482,17 +491,35 @@ emmc_gcc_400k(void)
+ 	uint32_t cfg = *(volatile uint32_t *)(gcc + 0x16030);
+ 	*(volatile uint32_t *)(gcc + 0x16030) = (cfg & ~0x0010371fu) | 0x00002017u;
+ 	*(volatile uint32_t *)(gcc + 0x1602c) |= 1u;
++	int updated = 0;
+ 	for (unsigned i = 0; i < (1u << 16); i++) {
+ 		if (!(*(volatile uint32_t *)(gcc + 0x1602c) & 1u)) {
++			updated = 1;
+ 			break;
+ 		}
+ 	}
++	{
++		char line[80];
++		snprintf(line, sizeof(line), "emmc: gcc cfg %08x m %02x n %02x d %02x up %d",
++		    *(volatile uint32_t *)(gcc + 0x16030),
++		    *(volatile uint32_t *)(gcc + 0x16034) & 0xffu,
++		    *(volatile uint32_t *)(gcc + 0x16038) & 0xffu,
++		    *(volatile uint32_t *)(gcc + 0x1603c) & 0xffu, updated);
++		BP_STAGE(line);
++	}
++	if (!updated) {
++		return -1;
++	}
++	BP_STAGE("emmc: gcc done");
+ 	return 0;
+ }
+ 
+ static void
+ emmc_clock_set_rate(uint32_t khz)
+ {
++	if (khz == 0 || khz == 400) {
++		(void)emmc_gcc_400k();
++	}
+ 	uint32_t base = su.base_mhz ? su.base_mhz * 1000u : 200000u;
+ 	uint64_t deadline = timeout_ns(100000ull * NSEC_PER_USEC);
+ 

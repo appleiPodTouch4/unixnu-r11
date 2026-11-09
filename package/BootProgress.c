@@ -108,6 +108,7 @@ extern volatile uint32_t armcpu_audit_tid __attribute__((weak_import));
 // the single stage row and is overwritten by the next stage; these survive.
 extern volatile uint32_t qcom_emmc_stage __attribute__((weak_import));
 extern volatile int32_t qcom_emmc_err __attribute__((weak_import));
+
 extern volatile uint64_t qcom_emmc_blocks __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_lasterr __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_probe __attribute__((weak_import));
@@ -123,6 +124,38 @@ extern volatile unsigned int qcom_emmc_bc __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_dat __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_sdm __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_d0 __attribute__((weak_import));
+// boot-irq56: the DMA/PIO comparison of the LBA-1 block and the CMD13 status after it.
+// d2q = first eight bytes the controller's DMA engine wrote, r2 = its (err|sig|nz),
+// sdma_ok/dmaerr = completed transfers and the raw status of the last one, st13 = the
+// card's status word after the data phase (0x00000900 = Transfer, no error).
+extern volatile unsigned long long qcom_emmc_d2q __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_r2 __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_sdma_ok __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_dmaerr __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_st13 __attribute__((weak_import));
+// boot-irq57: the host-controller layout. hc2_boot is what the bootloader left in
+// Host Control 2, hc2 what the driver programmed (0x3000 = V4EN + 64-bit addressing),
+// hc1 Host Control 1 (DMA select + bus width), v4 whether V4EN stuck. On a v4 host the
+// block count is the 32-bit register at 0x00, which is what `bc` now shows.
+extern volatile unsigned int qcom_emmc_hc1 __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_hc2 __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_hc2_boot __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_v4 __attribute__((weak_import));
+// boot-irq59: the bootloader's eMMC state, read before the normal re-identification.
+// hc1_boot = Host Control 1 (bus width / HS / DMA select), clk_boot = clock control,
+// ps_boot = PRESENT_STATE, vspec_boot = CORE_VENDOR_SPEC. irq58's warm read black-screened;
+// this image only observes the state.
+extern volatile unsigned int qcom_emmc_hc1_boot __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_clk_boot __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_ps_boot __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_vspec_boot __attribute__((weak_import));
+// boot-irq60: w = 1 after the boot-state read, 2 after CMD13, 3 when the warm ADMA2
+// LBA1 read delivered EFI PART and the driver kept the bootloader's 8-bit/HS400 state.
+extern volatile unsigned int qcom_emmc_warm __attribute__((weak_import));
+// boot-irq67: CMD6 HS_TIMING/BUS_WIDTH result: (error<<24) | busy-timeout(0x800000) |
+// low 24 bits of R1.  c6 on the EMMC2 row says whether the card accepted the switch.
+extern volatile unsigned int qcom_emmc_c6_hs __attribute__((weak_import));
+extern volatile unsigned int qcom_emmc_c6_bw __attribute__((weak_import));
 // The panic screen (scripts/xnu-panic-screen.c) also copies the formatted panic message here (first panic only, NUL-terminated):
 // a panic on a secondary core parks just that core, the next swap paints over the panic screen, and the live banner keeps the text.
 char boot_progress_panic_text[256];
@@ -413,11 +446,15 @@ static void draw(unsigned now) {
       (qcom_emmc_r1 >> 16) & 1u, qcom_emmc_ext & 0xffffu);
     line(27,b,0xffffc060);
     if (&sirius_emmc_oprobe) {
-      snprintf(b,sizeof(b),"EMMC2 vspec=%04x pwrctl=%04x r=%08x",
+      snprintf(b,sizeof(b),"EMMC2 vspec=%04x pwrctl=%04x r=%08x c6=%08x/%08x",
         sirius_emmc_oprobe,
         &sirius_emmc_pwrctl ? sirius_emmc_pwrctl : 0u,
-        &sirius_emmc_resp ? sirius_emmc_resp : 0u);
+        &sirius_emmc_resp ? sirius_emmc_resp : 0u,
+        &qcom_emmc_c6_hs ? qcom_emmc_c6_hs : 0u,
+        &qcom_emmc_c6_bw ? qcom_emmc_c6_bw : 0u);
       line(26,b,0xffffc060);
+
+
     }
   }
   __asm__ volatile("mrs %0,tcr_el1" : "=r"(tcr));
@@ -444,20 +481,43 @@ static void draw(unsigned now) {
    * line it ran past the last column and was cut off (boot-irq46). r1 = (err<<16)|(sig<<8)
    * of the CMD17 LBA-1 read, n = its non-zero byte count, x = EXT_CSD revision << 8 |
    * sector-count-present, s = whether the block began with "EFI PART". */
-  /* boot-irq48: row 2 is the eMMC diagnostics line. d1 is the first four bytes of the
-   * LBA-1 block, d0 is bytes 510..511 of LBA 0 (0x55AA if block addressing is right). */
-  snprintf(b,sizeof(b),"emmc r1=%06x x=%02x s=%u n=%u d1=%016llx d0=%06x",
-    qcom_emmc_r1 & 0xffffffu, qcom_emmc_ext & 0xffffu,
-    (qcom_emmc_r1 >> 16) & 1u, qcom_emmc_r1 & 0xffffu,
-    qcom_emmc_d1q, qcom_emmc_d0 & 0xffffffu);
+  /* boot-irq48: row 2 is the eMMC diagnostics line.
+   * boot-irq56: it now carries both reads of LBA 1 side by side. d1 is the PIO copy
+   * (what irq49..irq55 reported), d2 the DMA copy; s/s2 are their "EFI PART" tests and
+   * n/n2 their non-zero byte counts, e/e2 their command error codes. d1=d2=EFI PART
+   * means the old "EFI EFI " was a host-side drain/sampling artefact; d1=d2="EFI EFI "
+   * at 400 kHz leaves the card's own data phase as the only suspect. d0 is bytes
+   * 510..511 of LBA 0 (0x55AA when block addressing is right). */
+  snprintf(b,sizeof(b),"emmc d1=%016llx d2=%016llx s=%u s2=%u n=%u n2=%u e=%02x e2=%02x d0=%06x",
+    qcom_emmc_d1q, &qcom_emmc_d2q ? qcom_emmc_d2q : 0ull,
+    (qcom_emmc_r1 >> 16) & 1u, ((&qcom_emmc_r2 ? qcom_emmc_r2 : 0u) >> 16) & 1u,
+    qcom_emmc_r1 & 0xffffu, &qcom_emmc_r2 ? qcom_emmc_r2 & 0xffffu : 0u,
+    (qcom_emmc_r1 >> 24) & 0xffu, &qcom_emmc_r2 ? (qcom_emmc_r2 >> 24) & 0xffu : 0u,
+    qcom_emmc_d0 & 0xffffffu);
   line(2,b,0xffffffff);
   /* boot-irq54: the data-phase instruments get row 3 to themselves, in place of the
    * static TCR/TTBR/SCTLR text. bs/bc = BLOCK_SIZE/BLOCK_COUNT read back, dat = the four
    * DAT line levels sampled right after CMD17, sdm = SDMA address valid. Earlier attempts
-   * (row 25, row 4) were painted over by the console and by the CPU line. */
-  snprintf(b,sizeof(b),"emmc2 bs=%u bc=%u dat=%x sdm=%u",
-    qcom_emmc_bs & 0xffffu, qcom_emmc_bc & 0xffffu,
-    qcom_emmc_dat & 0xfu, qcom_emmc_sdm & 1u);
+   * (row 25, row 4) were painted over by the console and by the CPU line.
+   * boot-irq57: v4/hc1/hc2 show which SDHCI register layout the host uses; hc2 is printed
+   * as after/boot. bc is the count register the driver actually wrote: the v4 32-bit one
+   * at 0x00 when v4=1, the v3 16-bit one at 0x06 otherwise. ok = completed DMA transfers,
+   * st = the card's CMD13 status after the data phase, de = the controller's
+   * (ERR_INT_STATUS << 16) | INT_STATUS from the last DMA read.
+   * boot-irq61: ps/clk/vs moved back to the stage text; row 3 keeps hc1/hc2/w and the
+   * block/DMA status so st/de stay inside the panel width. */
+  snprintf(b,sizeof(b),"emmc2 v4=%u hc1=%02x/%02x hc2=%04x/%04x w=%u bs=%u bc=%u sdm=%u ok=%u st=%08x de=%08x",
+    &qcom_emmc_v4 ? qcom_emmc_v4 : 0u,
+    &qcom_emmc_hc1 ? qcom_emmc_hc1 : 0u,
+    &qcom_emmc_hc1_boot ? qcom_emmc_hc1_boot : 0u,
+    &qcom_emmc_hc2 ? qcom_emmc_hc2 : 0u,
+    &qcom_emmc_hc2_boot ? qcom_emmc_hc2_boot : 0u,
+    &qcom_emmc_warm ? qcom_emmc_warm : 0u,
+    qcom_emmc_bs & 0xffffu, qcom_emmc_bc,
+    qcom_emmc_sdm & 1u,
+    &qcom_emmc_sdma_ok ? qcom_emmc_sdma_ok : 0u,
+    &qcom_emmc_st13 ? qcom_emmc_st13 : 0u,
+    &qcom_emmc_dmaerr ? qcom_emmc_dmaerr : 0u);
   line(3,b,0xffffffff);
   // Row 4 carried the root-match counters (fnd/cand/fam/passes). They answered
   // their question and are now dead: the pass that publishes the DT nodes is not
@@ -752,7 +812,9 @@ static void draw(unsigned now) {
           r11_reg_enter,r11_reg_member,r11_reg_adjust,r11_reg_ok,r11_reg_svcroot,
           r11_sm_all,r11_sm_root,r11_sm_needcfg,r11_sm_sync,r11_sm_inline,r11_sm_job,
           r11_sm_state1,cs,cl);
-        if(n>0)line(3,b,0xffff8800);
+        /* boot-irq62: the match-pass REG row used to overwrite the eMMC row on row 3;
+         * move it below the stable block so the eMMC w/hc1/hc2/st/de line survives. */
+        if(n>0)line(28,b,0xffff8800);
       }
     }
     if(&native_cpufreq_stage && native_cpufreq_stage>=2)line(39,native_cpufreq_row,0xff00ccff);

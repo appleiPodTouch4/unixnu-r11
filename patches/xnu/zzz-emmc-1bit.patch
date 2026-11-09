@@ -1,0 +1,44 @@
+# R11: force the card back to a 1-bit bus before reading blocks.
+#
+# boot-irq52/53 showed BLOCK_SIZE=512, BLOCK_COUNT=1 and a valid SDMA address, yet the block
+# still arrived as 0x4546492045464920 ("EFI " twice) -- the same content the PIO port gave, so the
+# host side is no longer the suspect.
+#
+# CMD6 sets the card's bus width and the card keeps it across a warm reboot, because the eMMC
+# rail is not power-cycled between fastboot boots. This driver configures the host for 1-bit
+# during identification, so a card still driving 8 bits would put its bytes on the wrong lines
+# and the words would repeat. The switch is best effort and the host side is set to 1-bit to
+# match.
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -952,6 +952,30 @@
+ 	 * the next step is SDMA rather than more guessing. A static buffer keeps the
+ 	 * 512-byte payload off the stack.
+ 	 */
++	/*
++	 * boot-irq55: put the card back on a 1-bit bus before reading. CMD6 switches the card's
++	 * bus width, and the card keeps that width across a warm reboot (the eMMC rail is not
++	 * power-cycled between fastboot boots), while this driver configures the host as 1-bit
++	 * for the identification phase. A card still driving 8 bits into a host reading 1 bit
++	 * explains a block whose words repeat: the byte boundaries no longer line up. The switch
++	 * is best effort -- a card already at 1 bit answers the same way.
++	 */
++	(void)emmc_cmd(6, 0x03b70000u, /* EXT_CSD[183] = 0 (1-bit), R1b */
++	    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
++	{
++		uint64_t bw = timeout_ns(50ull * NSEC_PER_MSEC);
++		while (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_DAT0_LOW) {
++			if (!wait_deadline(bw)) {
++				break;
++			}
++		}
++	}
++	{
++		uint8_t hcw = hc_rd8(SDHCI_HOST_CONTROL);
++		hc_wr8(SDHCI_HOST_CONTROL, (uint8_t)(hcw & ~SDHCI_HC_WIDTH_8));
++		BP_STAGE("emmc: bus 1bit forced");
++	}
++
+ 	{
+ 		static uint8_t gpt_blk[512];
+ 		/* Start the data path from a known state: a previous transfer that never

@@ -71,6 +71,88 @@ zzz-emmc-clk4.patch
 zzz-emmc-bufrdy.patch
 # SDMA block read + BLOCK_SIZE/COUNT readback + DAT line sample.
 zzz-emmc-sdma2.patch
+# boot-irq56: real SDMA (the address is written and DMA enabled, which irq52/54 never
+# did) plus a PIO drain that waits for Transfer Complete, and a CMD13 after the data
+# phase. 400 kHz block clock, no CMD6 bus-width switch.
+zzz-emmc-sdma3.patch
+# boot-irq57: SDHCI 4.x register layout, ported from E5's NativeEmmc: V4EN + 64-bit
+# addressing (HC2=0x3000), 32-bit block count at 0x00, system address at 0x58/0x5c,
+# explicit SDMA select, v4 10-bit clock divider; and no CMD6 width/HS switch (the
+# validated E5 path reads the whole GPT in 1-bit default speed).
+zzz-emmc-v4.patch
+# boot-irq59: boot-irq58's warm CMD13+SDMA read black-screened on device, so this patch
+# is read-only: it publishes the bootloader eMMC state (hc1/hc2/clk/ps/vspec) after the
+# GCC gates are on, uses the boot HC2 layout, and then runs the ordinary re-identification.
+zzz-emmc-bootstate.patch
+# boot-irq61: black screen solved (irq60 kept EnableChargerWdog=0). The irq59 photo
+# showed HC1=0x38 (8-bit + ADMA64), CLK=0x0007 (~100 MHz), VSPEC=0x240a0e (HS400
+# select-in/DLL), so this patch keeps that state and makes one warm ADMA2 CMD17 read
+# of LBA1: GCC gates first, no HC1/clock/POR write, no SWRST_DAT. EFI PART keeps the
+# state and parses the GPT through ADMA2; otherwise the ordinary path runs.
+zzz-emmc-warm-adma.patch
+# boot-irq63: irq62 showed w=1/st=0 -- the card was not selected at CMD13. Send CMD7
+# RCA1 (R48) before CMD13, then ADMA2; HC1=0x38/CLK/VSPEC untouched.
+zzz-emmc-warm-cmd7.patch
+# boot-irq65: irq64 w=2 (CMD7 RCA1 failed), irq55 PIO did not black, irq56+ SDMA did.
+# Drop the normal-path SDMA LBA1 probe; first data command is PIO. Warm CMD7 remains
+# diagnostic and is expected to fail while the card is unselected.
+zzz-emmc-pio.patch
+# boot-irq66: irq65 PIO-only did not black but still read "EFI EFI "/EXT_CSD zero; the card
+# kept HS400 while the host was 1-bit. Clear HS_TIMING=0 first, then BUS_WIDTH=0, then PIO.
+zzz-emmc-hsreset.patch
+# boot-irq67: irq66 PIO still returned EFI EFI/EXT_CSD zero and hs0/bw1 scrolled out.
+# Publish CMD6 HS_TIMING/BUS_WIDTH R1 + busy + error as c6=<hs>/<bw> on the EMMC2 row.
+zzz-emmc-c6.patch
+# boot-irq68: irq67 c6=00800900/00800900 = CMD6 accepted but DAT0 busy timed out at 200 ms;
+# wait 2 s, stop before data on busy, then 1 ms settle.
+zzz-emmc-c6wait.patch
+# boot-irq69: irq68 showed HS_TIMING=0 accepted (c6 00000900) but BUS_WIDTH left CMD
+# inhibit/init 60. Keep the card/host 8-bit, skip BUS_WIDTH, PIO at default speed.
+zzz-emmc-8bit.patch
+# boot-irq70: sirius shows vqmmc=1.8 V while the controller sat at 3.0 V; commands work,
+# data doesn't. Our irq65-69 ran POWER_CONTROL=0x0f. Force 0x0b + HC2 bit3 before data.
+zzz-emmc-18v.patch
+# boot-irq71: irq70's late 1.8 V write was never reached because HS0 was busy at 3.3 V.
+# Move 1.8 V before CMD7/CMD13/HS0 so the timing switch runs at the card I/O voltage.
+zzz-emmc-18v-early.patch
+# boot-irq83: skip the HS_TIMING/BUS_WIDTH switch entirely; after CMD0 the card is
+# default 1-bit, host HC1=0, PHY 1.8 V, PIO read. HS0 busy was the blocker.
+zzz-emmc-1bit-default.patch
+# boot-irq84: warm RCA scan 1..8 (CMD13, then CMD7+CMD13), then PIO LBA1 in the
+# inherited 8-bit/HS400 state; no 64-bit ADMA descriptor, no host reset.
+zzz-emmc-warm-rca.patch
+# boot-irq85: skip SWRST_ALL, which stays asserted on this unit and leaves the host
+# half-reset; keep boot host state, then the normal CMD0..CMD7 1-bit path.
+zzz-emmc-noswreset.patch
+# boot-irq86: SDM660 SDCC has no internal divider; program GCC sdcc1_apps_clk_src
+# to 400 kHz (clover CFG=0x2017 M=1 N=fc D=fb), and clear VENDOR_SPEC3 bit10
+# (alt FIFO) which makes the buffer port return the first word forever.
+zzz-emmc-gcc400.patch
+# boot-irq87: irq86 hung before "clk 400k id"/v3; stop calling the GCC root-clock
+# helper, keep the VENDOR_SPEC3 alt-FIFO clear, so the FIFO fix is tested alone.
+zzz-emmc-fifo-only.patch
+# boot-irq88: re-enable GCC 400k, but stop the card clock and RESET_CMD|DATA (0x06)
+# first (clover mode 6); stages stop/rst/cfg/up/done.
+zzz-emmc-gcc-safe.patch
+# boot-irq89: skip the CORE_PWRCTL handshake/probe; clover sets 1.8 V and proceeds.
+zzz-emmc-pwrskip.patch
+# boot-irq90: after GCC root 400k, SDHCI divider must be 0 (clover), not the v3
+# 249 field computed for a 200 MHz base; otherwise CMD1 is divided twice.
+zzz-emmc-div0.patch
+# boot-irq91: restore the CORE_PWRCTL handshake/probe; divider=0 did not make CMD1
+# answer, so the card power is the remaining suspect.
+zzz-emmc-pwrrestore.patch
+# USB CDC serial parked (2026-11-08): STILL u=5 after reset/status/endpoint fixes.
+# Files kept on disk for later: native-dwc3-console.patch, zzz-dwc3-*.patch.
+# REJECTED, kept on disk: boot-irq58's warm-inherit CMD13+SDMA read (black screen).
+#zzz-emmc-warm.patch
+# REJECTED, kept on disk for reference and not in the series: boot-irq55 forced the card
+# back to 1-bit with CMD6 before reading, on the theory that a card left in 8-bit mode
+# by the previous boot was putting its bytes on the wrong lines. The reverse came back:
+# LBA 1 read all zeros with EIO and LBA 0 timed out, so the switch broke a data phase
+# that had at least been delivering the first word. The card is in 1-bit mode (an 8-bit
+# card on a 1-bit host would not produce "EFI " at all), so the hypothesis is dead.
+#zzz-emmc-1bit.patch
 component:XnuPrelink/patches/xnu-8796.101.5-security-init.patch
 component:XnuPrelink/patches/xnu-8796.101.5-sparse-index.patch
 # Host-toolchain workaround, not a behaviour change: osfmk/ipc/mach_port.c

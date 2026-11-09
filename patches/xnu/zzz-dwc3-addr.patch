@@ -1,0 +1,72 @@
+diff --git a/pexpert/arm/native-dwc3-console.c b/pexpert/arm/native-dwc3-console.c
+index 7071f86..e191e53 100644
+--- a/pexpert/arm/native-dwc3-console.c
++++ b/pexpert/arm/native-dwc3-console.c
+@@ -55,6 +55,9 @@ static uint8_t ring[RING_BYTES];
+ static uint64_t ring_head, ring_tail, transfer_end, reset_deadline;
+ volatile uint32_t unixnu_dwc3_phase, unixnu_dwc3_error, unixnu_dwc3_last_event;
+ volatile uint32_t unixnu_dwc3_gsnpsid, unixnu_dwc3_phy_seq;
++volatile uint32_t unixnu_dwc3_resets, unixnu_dwc3_setups;
++volatile uint32_t unixnu_dwc3_status_ok, unixnu_dwc3_status_fail;
++static int pending_address = -1;
+ volatile uint32_t unixnu_dwc3_last_command, unixnu_dwc3_last_command_status;
+ volatile uint64_t unixnu_dwc3_transmitted, unixnu_dwc3_dropped;
+ volatile uint32_t unixnu_dwc3_qcom_session_before, unixnu_dwc3_qcom_session_after;
+@@ -148,7 +151,8 @@ static void status_transfer(unsigned ep)
+ {
+     if (status_started || ep0_state == 0) return;
+     status_started = true; ep0_state = 2;
+-    (void)transfer(ep, dma.control, 0, three_stage ? 4 : 3);
++    if (transfer(ep, dma.control, 0, three_stage ? 4 : 3)) unixnu_dwc3_status_ok++;
++    else unixnu_dwc3_status_fail++;
+ }
+ static void stall_setup(void)
+ {
+@@ -178,6 +182,7 @@ static void control_in(const void *bytes, unsigned length, unsigned requested)
+ }
+ static void handle_setup(void)
+ {
++    unixnu_dwc3_setups++;
+     cache_sync(dma.setup, sizeof(dma.setup));
+     const uint8_t *s = dma.setup;
+     unsigned type = s[0], request = s[1], value = s[2] | (s[3] << 8);
+@@ -196,7 +201,9 @@ static void handle_setup(void)
+             text[0] = (uint8_t)(2 + count*2); text[1] = 3; control_in(text, text[0], length);
+         } else stall_setup();
+     } else if (type == 0 && request == 5 && !length && value < 128) {
+-        write_reg(DCFG, (read_reg(DCFG) & ~(127u << 3)) | (value << 3));
++        /* Change DCFG only after the zero-length status packet has completed;
++         * the host still addresses that packet to the old address. */
++        pending_address = (int)value;
+         status_transfer(0);
+     } else if (type == 0 && request == 9 && !length && value <= 1) {
+         configured = false; end_transfer(2); end_transfer(3); end_transfer(5);
+@@ -273,11 +280,17 @@ static void endpoint_event(uint32_t event)
+     transfer_active[ep] = false; resources[ep] = 0;
+     if (ep <= 1) {
+         if (ep0_state == 0) handle_setup();
+-        else if (ep0_state == 2) arm_setup();
+-        else {
++        else if (ep0_state == 2) {
++            if (pending_address >= 0) {
++                write_reg(DCFG, (read_reg(DCFG) & ~(127u << 3)) |
++                    ((unsigned)pending_address << 3));
++                pending_address = -1;
++            }
++            arm_setup();
++        } else {
+             if (!direction_in && completed == 7) { cache_sync(dma.control, sizeof(dma.control)); memcpy(line_coding, dma.control, 7); }
+-            // Status is armed only upon the controller's XferNotReady status event.
+             ep0_state = 2;
++            status_transfer(0);
+         }
+     } else if (ep == 3) {
+         uint64_t completed_end = transfer_end - remaining;
+@@ -313,6 +326,7 @@ void unixnu_dwc3_poll(void)
+                  * otherwise the address/descriptor phase never starts and the panel
+                  * stays at phase 5 (irq75: u=5/0/5533300a). */
+                 unixnu_dwc3_phase = 5;
++                unixnu_dwc3_resets++;
+                 configured = false; command_position = 0;
+                 ep0_state = 0; status_started = false;
+                 for (unsigned ep = 0; ep < EP_COUNT; ep++) end_transfer(ep);

@@ -1,0 +1,33 @@
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 0adce02..ed00e1d 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1151,23 +1151,12 @@ emmc_device_init(void)
+ 
+ 	/* Software reset, then report the hardware identity. */
+ 	/*
+-	 * SWRST_ALL is self-clearing. On this unit it stays asserted for the full
+-	 * timeout after the bootloader has already initialised the host (boot-irq21:
+-	 * "emmc: sw reset stuck", clk=0x0007 and card-inserted both already set). A
+-	 * stuck host-controller reset does not by itself mean the card or the CMD
+-	 * path is dead, and every step below reports its own verdict, so bound the
+-	 * wait and continue instead of ending the whole probe here.
++	 * boot-irq85: do NOT issue SWRST_ALL.  On this unit it stays asserted for the
++	 * full timeout and leaves the host in a half-reset state; UniXNU-e5's working
++	 * path deliberately avoids RESET_ALL for the same reason.  Keep the
++	 * bootloader's host state and let the CMD0/CMD1/... re-identification below
++	 * put the card back in default 1-bit mode.
+ 	 */
+-	hc_wr8(SDHCI_SOFTWARE_RESET, 0x01u);
+-	{
+-		uint64_t reset_deadline = timeout_ns(100ull * NSEC_PER_MSEC);
+-		while (hc_rd8(SDHCI_SOFTWARE_RESET) & 1u) {
+-			if (!wait_deadline(reset_deadline)) {
+-				BP_STAGE("emmc: sw reset skip");
+-				break;
+-			}
+-		}
+-	}
+ 	/*
+ 	 * boot-irq57 tried to force the host into SDHCI 4.x here (HC2 = 0x3000).
+ 	 * boot-irq57's own photo showed the bootloader had left HC2 = 0x0003

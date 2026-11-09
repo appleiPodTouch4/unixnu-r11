@@ -1,0 +1,22 @@
+diff --git a/pexpert/arm/native-dwc3-console.c b/pexpert/arm/native-dwc3-console.c
+index 2ff7e5a..5e994af 100644
+--- a/pexpert/arm/native-dwc3-console.c
++++ b/pexpert/arm/native-dwc3-console.c
+@@ -180,7 +180,7 @@ static void control_in(const void *bytes, unsigned length, unsigned requested)
+     if (length > sizeof(dma.control)) { stall_setup(); return; }
+     memcpy(dma.control, bytes, length);
+     ep0_state = 1;
+-    (void)transfer(1, dma.control, length, 5);
++    (void)transfer(1, dma.control, length, 3);
+ }
+ static void handle_setup(void)
+ {
+@@ -234,7 +234,7 @@ static void handle_setup(void)
+     } else if (type == 0xa1 && request == 0x21 && index == 0 && length == 7) {
+         control_in(line_coding, 7, length);
+     } else if (type == 0x21 && request == 0x20 && index == 0 && length == 7) {
+-        (void)transfer(0, dma.control, 64, 5);
++        (void)transfer(0, dma.control, 64, 3);
+     } else if (type == 0x21 && (request == 0x22 || request == 0x23) && index == 0 && !length) {
+         // Control lines/break do not change the byte transport.
+     } else stall_setup();

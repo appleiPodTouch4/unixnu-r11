@@ -1,0 +1,86 @@
+diff --git a/pexpert/arm/native-dwc3-console.c b/pexpert/arm/native-dwc3-console.c
+index f4dc341..5df181f 100644
+--- a/pexpert/arm/native-dwc3-console.c
++++ b/pexpert/arm/native-dwc3-console.c
+@@ -44,15 +44,17 @@ struct dma_area {
+ } __attribute__((aligned(4096)));
+ static struct dma_area dma;
+ static uintptr_t registers;
++static uintptr_t phy_registers;
+ static uint64_t dma_physical, frequency;
+ static bool active, configured, busy, direction_in, three_stage, status_started, initialization_attempted;
+-static bool qcom_usb0;
++static bool qcom_usb0, r11_usb;
+ static unsigned ep0_state, event_position, packet_size = 512, command_position;
+ static uint32_t transfer_length[EP_COUNT], resources[EP_COUNT];
+ static bool transfer_active[EP_COUNT];
+ static uint8_t ring[RING_BYTES];
+ static uint64_t ring_head, ring_tail, transfer_end, reset_deadline;
+ volatile uint32_t unixnu_dwc3_phase, unixnu_dwc3_error, unixnu_dwc3_last_event;
++volatile uint32_t unixnu_dwc3_gsnpsid, unixnu_dwc3_phy_seq;
+ volatile uint32_t unixnu_dwc3_last_command, unixnu_dwc3_last_command_status;
+ volatile uint64_t unixnu_dwc3_transmitted, unixnu_dwc3_dropped;
+ volatile uint32_t unixnu_dwc3_qcom_session_before, unixnu_dwc3_qcom_session_after;
+@@ -321,6 +323,24 @@ void unixnu_dwc3_put(uint8_t byte) { append(byte); unixnu_dwc3_poll(); }
+ unsigned int unixnu_dwc3_receive_ready(void) { unixnu_dwc3_poll(); return 0; }
+ uint8_t unixnu_dwc3_receive(void) { return 0; }
+ 
++/* R11 SDM660 QUSB2 PHY at 0xc012000, init sequence from the stock DTS
++ * qcom,qusb-phy-init-seq.  The firmware usually leaves the PHY powered; this
++ * replays the PHY register sequence because UEFI may stop its own USB stack at
++ * ExitBootServices.  Clocks/resets/GDSC are not touched here. */
++static void qusb2_phy_init(void)
++{
++    static const uint8_t seq[] = {
++        0xf8, 0x80, 0x83, 0x84, 0x83, 0x88, 0xc5, 0x8c,
++        0x30, 0x08, 0x79, 0x0c, 0x21, 0x10, 0x14, 0x9c,
++        0x9f, 0x1c, 0x00, 0x18
++    };
++    for (unsigned i = 0; i + 1 < sizeof(seq); i += 2) {
++        *(volatile uint8_t *)(phy_registers + seq[i]) = seq[i + 1];
++    }
++    __asm__ volatile("dsb sy" ::: "memory");
++    unixnu_dwc3_phy_seq = 1;
++}
++
+ bool unixnu_dwc3_init(void)
+ {
+     // serial_init is called again by PE_init_kprintf. Preserve live transfers,
+@@ -342,13 +362,21 @@ bool unixnu_dwc3_init(void)
+     initialization_attempted = true;
+     registers = ml_io_map((vm_offset_t)window[0], (vm_size_t)window[1]);
+     if (!registers) return false;
++    if (window[0] == 0x0a800000) {
++        /* R11 SDM660 USB0: QUSB2 PHY at 0xc012000, QSCRATCH session below. */
++        r11_usb = true;
++        phy_registers = ml_io_map(0x0c012000, 0x1000);
++        if (!phy_registers) return false;
++        qusb2_phy_init();
++    }
+     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+     dma_physical = ml_static_vtop((vm_offset_t)&dma);
+ #endif
+     initialization_attempted = true;
+     if (!frequency || !dma_physical) return false;
+     unixnu_dwc3_phase = 1;
+-    uint32_t id = read_reg(GSNPSID) >> 16;
++    unixnu_dwc3_gsnpsid = read_reg(GSNPSID);
++    uint32_t id = unixnu_dwc3_gsnpsid >> 16;
+     if (id != 0x5533 && id != 0x3331) return false;
+     write_reg(DCTL, (read_reg(DCTL) & ~(1u << 31)) | (1u << 30));
+     uint64_t deadline = ticks() + frequency / 10;
+@@ -358,10 +386,10 @@ bool unixnu_dwc3_init(void)
+               (2u << 12) | (qcom_usb0 ? 1u : 0)); // lahaina DT: disable-clk-gating
+     // Keep firmware's UTMI width and PHY tuning; clear USB2 PHY suspend/sleep gating.
+     write_reg(0xc200, read_reg(0xc200) & ~((1u << 6) | (1u << 8)));
+-    if (qcom_usb0) {
+-        // SM8350 QSCRATCH HS_PHY_CTRL, as in dwc3-qcom's VBUS override.
+-        // USB is attached to a host; select and assert UTMI session validity.
+-        // This does not initialize external PHY supplies or clocks.
++    if (qcom_usb0 || r11_usb) {
++        // QSCRATCH HS_PHY_CTRL: select UTMI and assert session validity so the
++        // controller pulls up on the host side.  R11 uses the same offset in its
++        // 0x0a800000 window as zeta does in 0x0a600000.
+         unixnu_dwc3_qcom_session_before = read_reg(0xf8810);
+         write_reg(0xf8810, unixnu_dwc3_qcom_session_before | (1u << 20) | (1u << 28));
+         unixnu_dwc3_qcom_session_after = read_reg(0xf8810);

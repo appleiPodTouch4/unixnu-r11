@@ -1,0 +1,38 @@
+diff --git a/pexpert/arm/native-dwc3-console.c b/pexpert/arm/native-dwc3-console.c
+index e191e53..2ff7e5a 100644
+--- a/pexpert/arm/native-dwc3-console.c
++++ b/pexpert/arm/native-dwc3-console.c
+@@ -58,6 +58,8 @@ volatile uint32_t unixnu_dwc3_gsnpsid, unixnu_dwc3_phy_seq;
+ volatile uint32_t unixnu_dwc3_resets, unixnu_dwc3_setups;
+ volatile uint32_t unixnu_dwc3_status_ok, unixnu_dwc3_status_fail;
+ static int pending_address = -1;
++volatile uint32_t unixnu_dwc3_last_setup, unixnu_dwc3_last_setup_len;
++volatile uint32_t unixnu_dwc3_status_done, unixnu_dwc3_ep0_done;
+ volatile uint32_t unixnu_dwc3_last_command, unixnu_dwc3_last_command_status;
+ volatile uint64_t unixnu_dwc3_transmitted, unixnu_dwc3_dropped;
+ volatile uint32_t unixnu_dwc3_qcom_session_before, unixnu_dwc3_qcom_session_after;
+@@ -187,6 +189,8 @@ static void handle_setup(void)
+     const uint8_t *s = dma.setup;
+     unsigned type = s[0], request = s[1], value = s[2] | (s[3] << 8);
+     unsigned index = s[4] | (s[5] << 8), length = s[6] | (s[7] << 8);
++    unixnu_dwc3_last_setup = (type << 24) | (request << 16) | (value & 0xffffu);
++    unixnu_dwc3_last_setup_len = (index << 16) | (length & 0xffffu);
+     direction_in = (type & 128) != 0; three_stage = length != 0;
+     status_started = false; ep0_state = length ? 1 : 2;
+     if (type == 0x80 && request == 6) {
+@@ -281,6 +285,7 @@ static void endpoint_event(uint32_t event)
+     if (ep <= 1) {
+         if (ep0_state == 0) handle_setup();
+         else if (ep0_state == 2) {
++            unixnu_dwc3_status_done++;
+             if (pending_address >= 0) {
+                 write_reg(DCFG, (read_reg(DCFG) & ~(127u << 3)) |
+                     ((unsigned)pending_address << 3));
+@@ -288,6 +293,7 @@ static void endpoint_event(uint32_t event)
+             }
+             arm_setup();
+         } else {
++            unixnu_dwc3_ep0_done++;
+             if (!direction_in && completed == 7) { cache_sync(dma.control, sizeof(dma.control)); memcpy(line_coding, dma.control, 7); }
+             ep0_state = 2;
+             status_transfer(0);

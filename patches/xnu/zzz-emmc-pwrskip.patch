@@ -1,0 +1,86 @@
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 2595ccb..4eb9651 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1325,74 +1325,14 @@ emmc_device_init(void)
+ 	hc_wr8(SDHCI_HOST_CONTROL + 1, 0x0bu);
+ 
+ 	/*
+-	 * boot-irq33: the previous round read CORE_PWRCTL_STATUS before asking for bus
+-	 * power and saw only BUS_OFF. The handshake is the other way round: the PMIC
+-	 * acts on the SDHCI bus-power bit and reports through CORE_PWRCTL_STATUS, and
+-	 * the AP must acknowledge each request through CORE_PWRCTL_CTL before the card
+-	 * really has its rails. So request power at 3.3 V, wait for and acknowledge the
+-	 * event, then repeat at 1.8 V (this board's vqmmc is fixed 1.8 V), and only
+-	 * then send CMD0. The two status nibbles are published as pwrctl= so the panel
+-	 * distinguishes "PMIC never answered" from "answered and still mute".
++	 * boot-irq89: clover does not run the Qualcomm CORE_PWRCTL handshake; its
++	 * firmware leaves the rails on and it just sets 1.8 V and proceeds.  Here the
++	 * handshake reported "pwr no event" and then sat in the 3.3/3.0/1.8 CMD1
++	 * probe while GCC 400k and the alt-FIFO clear had already succeeded.  Skip it
++	 * and go straight to CMD0/CMD1 at 400 kHz.
+ 	 */
+-	{
+-		static const uint8_t kPwr[2] = { 0x0fu, 0x0bu };	/* 3.3 V, then 1.8 V */
+-		uint32_t packed = 0;
+-		for (int i = 0; i < 2; i++) {
+-			uint64_t d = timeout_ns(200ull * NSEC_PER_MSEC);
+-			uint32_t st = 0;
+-			hc_wr8(SDHCI_HOST_CONTROL + 1, kPwr[i]);
+-			for (;;) {
+-				st = hc_rd(CORE_PWRCTL_STATUS) & 0xfu;
+-				if (st) {
+-					uint32_t ack = 0;
+-					if (st & (CORE_PWRCTL_BUS_ON | CORE_PWRCTL_BUS_OFF)) {
+-						ack |= CORE_PWRCTL_BUS_SUCCESS;
+-					}
+-					if (st & (CORE_PWRCTL_IO_LOW | CORE_PWRCTL_IO_HIGH)) {
+-						ack |= CORE_PWRCTL_IO_SUCCESS;
+-					}
+-					hc_wr(CORE_PWRCTL_CTL, ack);
+-					hc_wr(CORE_PWRCTL_CLEAR, st);
+-					break;
+-				}
+-				if (!wait_deadline(d)) {
+-					break;
+-				}
+-			}
+-			packed = (packed << 4) | (st & 0xfu);
+-		}
+-		sirius_emmc_pwrctl = packed;
+-		BP_STAGE((packed & 0xfu) ? "emmc: pwr bus_on" : "emmc: pwr no event");
+-
+-		/*
+-		 * boot-irq34: the 3.3 V request raised BUS_ON and was acknowledged, so the
+-		 * PMIC does switch the bus -- yet the card stayed mute with the bus left at
+-		 * 1.8 V. This board's vmmc is 2.95 V and its vqmmc is 1.8 V, and the SDHCI
+-		 * bus-voltage field is what the PMIC follows, so try CMD1 at 3.3 V, 3.0 V and
+-		 * 1.8 V in turn and record which one (if any) the card answers. The mask lands
+-		 * in the high byte of pwrctl= so a single photograph separates them.
+-		 */
+-		{
+-			static const uint8_t kProbePwr[3] = { 0x0fu, 0x0du, 0x0bu };
+-			uint32_t r[4];
+-			unsigned pwr_mask = 0;
+-			for (unsigned v = 0; v < 3; v++) {
+-				hc_wr8(SDHCI_HOST_CONTROL + 1, kProbePwr[v]);
+-				delay(20000);	/* 20 ms for the rail to settle */
+-				hc_wr8(SDHCI_SOFTWARE_RESET, 0x02u);
+-				delay(1000);
+-				(void)emmc_cmd(0, 0, SDHCI_CMD_RESP_NONE, NULL, NULL, 0);
+-				if (!emmc_cmd(1, 0x40ff8080u, SDHCI_CMD_RESP_R48, r, NULL, 0)) {
+-					pwr_mask |= (1u << v);
+-					su.ocr = r[0];
+-					break;
+-				}
+-				hc_wr8(SDHCI_SOFTWARE_RESET, 0x02u);
+-			}
+-			sirius_emmc_pwrctl = (sirius_emmc_pwrctl & 0xffu) | (pwr_mask << 8);
+-			BP_STAGE(pwr_mask ? "emmc: pwr volt hit" : "emmc: pwr volt none");
+-		}
+-	}
++	hc_wr8(SDHCI_HOST_CONTROL + 1, 0x0bu);
++	BP_STAGE("emmc: pwr skip");
+ 
+ 	/*
+ 	 * boot-irq24's CMD1 came back with a real error bit and CMD-inhibit still set.

@@ -1,0 +1,55 @@
+# R11: set 1.8 V before CMD7/CMD13/HS_TIMING, not after HS_TIMING.
+#
+# boot-irq70's photo:
+#   c7 ok st 00000900 e0
+#   hs0 ok
+#   hs0 busy
+#   init failed 60
+# HS_TIMING=0 was accepted but DAT0 stayed busy for 2 s and the function returned
+# before the late 1.8 V write ran -- so irq70 never tested sirius's voltage fix.
+#
+# This patch moves POWER_CONTROL=0x0b + HOST_CONTROL2 bit3 to after CMD3, before
+# CMD7/CMD13/HS0, matching sirius's prepare order.  The late duplicate is removed.
+# Still 8-bit/default-speed/PIO-only after a successful HS0; if HS0 is busy again at
+# 1.8 V, the timing switch itself (not the data voltage) is the next problem.
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 208a8ed..d3da053 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1423,6 +1423,17 @@ emmc_device_init(void)
+ 		return error;
+ 	}
+ 
++	/*
++	 * boot-irq71: sirius sets 1.8 V before any card command.  irq70 put the write
++	 * after HS_TIMING=0, so HS0 itself still ran at 3.3 V, held DAT0 busy and
++	 * returned before the 1.8 V code was reached.  Do it here, after CMD3 and
++	 * before CMD7/CMD13/HS0, so the timing switch runs at the card's I/O voltage.
++	 */
++	hc_wr8(0x29, 0x0bu);	/* SDHCI Power Control: 1.8 V bus power on */
++	hc_wr16(SDHCI_HOST_CONTROL2,
++	    (uint16_t)(hc_rd16(SDHCI_HOST_CONTROL2) | 0x0008u));
++	delay(1000);
++
+ 	/*
+ 	 * boot-irq37: select the card before touching CMD6. After CMD3 the card is in
+ 	 * Stand-by -- an RCA is assigned but the card is not selected -- and CMD6
+@@ -1506,18 +1517,6 @@ emmc_device_init(void)
+ 		    SDHCI_HC_WIDTH_8));
+ 		qcom_emmc_c6_bw = 0;
+ 		delay(1000);	/* let the timing switch settle before the first data command */
+-
+-		/*
+-		 * boot-irq70: sirius shows this board class keeps vqmmc at 1.8 V while the
+-		 * controller is left at 3.0 V; commands survive that mismatch but multi-line
+-		 * data does not.  irq65-69 ran with POWER_CONTROL=0x0f (3.3 V), which is
+-		 * exactly the stale-data symptom.  Force 1.8 V bus power and 1.8 V signalling
+-		 * just before the first data read, after the PMIC handshake is done.
+-		 */
+-		hc_wr8(0x29, 0x0bu);	/* SDHCI Power Control: 1.8 V bus power on */
+-		hc_wr16(SDHCI_HOST_CONTROL2,
+-		    (uint16_t)(hc_rd16(SDHCI_HOST_CONTROL2) | 0x0008u));
+-		delay(1000);
+ 	}
+ 
+ 	/*

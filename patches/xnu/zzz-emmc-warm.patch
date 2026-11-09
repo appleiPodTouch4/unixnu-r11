@@ -1,0 +1,213 @@
+# R11: warm-inherit first -- read LBA1 in the bootloader's live eMMC state.
+#
+# boot-irq57's photo (tag irq57) recorded hc2=3000/0003: the bootloader had left
+# V4EN clear, and forcing it made both the PIO and SDMA data phases time out while
+# CMD13/CMD8 command phases kept working.  The v4 forcing is therefore reverted:
+# the v4 register branches stay for a host that boots with V4EN set, but they are
+# selected by the boot HC2 readback, not written by this driver.
+#
+# This patch takes the other half of E5's NativeEmmc lesson.  Its first data read
+# happens in the state the bootloader left (CMD13 on RCA 1, one SDMA read) before
+# any re-identification.  Our driver had always started with SWRST_ALL, a
+# CORE_VENDOR_SPEC POR write, PMIC power sequencing and a clock change -- all of
+# which the warm path does not need, and the POR write also clears the vendor
+# DLL/tuning state the bootloader set for its own eMMC reads.
+#
+# The warm probe:
+#   - reads hc1/hc2/clock/present and publishes them;
+#   - enables status polling and the maximum data timeout, without resetting;
+#   - sends CMD13 on RCA 1 and requires CURRENT_STATE=Transfer, no error;
+#   - reads LBA1 with SDMA, preserving the bootloader's bus width / HS / DLL state.
+# If EFI PART arrives, qcom_emmc_init keeps that state, parses the GPT and skips
+# the destructive init.  If not, the old path runs with the boot HC2 layout (v3
+# on this board).
+#
+# Panel row 3 gains hc1=after/boot, hc2=after/boot and w=0..3 (0 not run, 1 after
+# CMD13, 2 after the LBA1 read, 3 after EFI PART was kept).
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 11ad764..5825993 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -132,6 +132,16 @@ volatile unsigned int qcom_emmc_r2, qcom_emmc_sdma_phys, qcom_emmc_sdma_ok,
+  * Host Control 1 (DMA select / bus width), v4 whether V4EN stuck.
+  */
+ volatile unsigned int qcom_emmc_hc1, qcom_emmc_hc2, qcom_emmc_hc2_boot, qcom_emmc_v4;
++/*
++ * boot-irq58: E5's NativeEmmc reads LBA1 in the state the bootloader left, before
++ * any reset/clock/power change, and only then re-identifies.  This port never tried
++ * that: it reset the host, wrote the vendor POR value, power-sequenced the card and
++ * re-identified, so a warm-inherit read was never tested.  warm is 1 when only CMD13
++ * was attempted, 2 when the LBA1 read ran, 3 when it delivered EFI PART and the
++ * driver kept the bootloader's bus state.  hc1_boot is Host Control 1 before this
++ * driver wrote it (bus width / HS / DMA select the bootloader chose).
++ */
++volatile unsigned int qcom_emmc_warm, qcom_emmc_hc1_boot;
+ /* The DMA landing zone. One block (512 = EMMC_BLOCK below), page aligned so the CPU
+  * physical address is guaranteed to cover 512 contiguous bytes of one page; the block
+  * is bounced through it because a caller's buffer has no such guarantee. */
+@@ -892,6 +902,99 @@ emmc_find_partition(const char *want)
+ 	return ENOENT;
+ }
+ 
++
++/*
++ * boot-irq58: read LBA1 in the state the bootloader left, before doing anything
++ * destructive.  E5's NativeEmmc does exactly this: CMD13 on the RCA the bootloader
++ * used, then one SDMA read, and only if that fails does it re-identify the card.
++ * This port had always started with SWRST_ALL + a CORE_VENDOR_SPEC POR write +
++ * PMIC power sequencing, so the warm state was never tested -- and those steps also
++ * clear the vendor DLL/tuning the bootloader had set for its own eMMC reads.
++ *
++ * The probe only enables status polling, sets the maximum data timeout, sends CMD13
++ * and reads LBA1.  It does not touch the clock, the bus width, the power rails or
++ * the vendor registers, and it selects SDMA in HC1 while preserving the width/HS
++ * bits the bootloader chose.  qcom_emmc_warm is 1 after CMD13, 2 after the LBA1
++ * read, 3 when EFI PART arrived; the caller keeps the warm state only on 3.
++ */
++static int
++emmc_warm_probe(void)
++{
++	static uint8_t warm_blk[512];
++	uint32_t st[4] = { 0, 0, 0, 0 };
++	uint8_t hc1;
++	uint16_t hc2;
++	unsigned nz = 0;
++	int sig, error;
++
++	hc1 = hc_rd8(SDHCI_HOST_CONTROL);
++	hc2 = hc_rd16(SDHCI_HOST_CONTROL2);
++	qcom_emmc_hc1_boot = hc1;
++	qcom_emmc_hc1 = hc1;
++	qcom_emmc_hc2_boot = hc2;
++	qcom_emmc_hc2 = hc2;
++	su.v4 = (hc2 & SDHCI_HC2_V4EN) != 0;
++	qcom_emmc_v4 = su.v4 ? 1u : 0u;
++	qcom_emmc_warm = 1;
++	sirius_emmc_oprobe = hc_rd(CORE_VENDOR_SPEC);
++	{
++		char line[80];
++
++		snprintf(line, sizeof(line), "emmc: warm hc1 %02x hc2 %04x clk %04x",
++		    hc1, hc2, hc_rd16(SDHCI_CLOCK_CONTROL));
++		BP_STAGE(line);
++	}
++
++	/* Polling only: status enables and the maximum data timeout, no reset. */
++	hc_wr16(SDHCI_INT_ENABLE, SDHCI_INT_CMD_COMPLETE | SDHCI_INT_TX_COMPLETE |
++	    SDHCI_INT_BUF_RDY | SDHCI_INT_ERROR);
++	hc_wr16(SDHCI_SIGNAL_ENABLE, 0xffffu);
++	hc_wr16(0x38, 0);
++	hc_wr16(0x3a, 0);
++	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++	hc_wr8(SDHCI_TIMEOUT_CONTROL, 0x0eu);
++
++	/* CMD13 on the RCA the bootloader used (1, as in E5's LK handoff). */
++	error = emmc_cmd(13, 1u << 16,
++	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, st, NULL, 0);
++	qcom_emmc_st13 = st[0];
++	if (error || (st[0] & 0x1f00u) != 0x900u) {
++		BP_STAGE(error ? "emmc: warm c13 err" : "emmc: warm c13 state");
++		return error ? error : ENXIO;
++	}
++	su.rca = 1;
++	BP_STAGE("emmc: warm c13 ok");
++
++	qcom_emmc_warm = 2;
++	bzero(warm_blk, sizeof(warm_blk));
++	error = emmc_sdma_read(17, 1u, warm_blk);
++	for (unsigned i = 0; i < sizeof(warm_blk); i++) {
++		if (warm_blk[i]) {
++			nz++;
++		}
++	}
++	sig = (warm_blk[0] == 'E' && warm_blk[1] == 'F' && warm_blk[2] == 'I' &&
++	    warm_blk[3] == ' ' && warm_blk[4] == 'P' && warm_blk[5] == 'A' &&
++	    warm_blk[6] == 'R' && warm_blk[7] == 'T');
++	qcom_emmc_r2 = ((unsigned)(error & 0xff) << 24) |
++	    ((unsigned)(sig & 1) << 16) | (nz & 0xffffu);
++	qcom_emmc_d2q = 0;
++	for (unsigned i = 0; i < 8; i++) {
++		qcom_emmc_d2q = (qcom_emmc_d2q << 8) | warm_blk[i];
++	}
++	if (error) {
++		BP_STAGE("emmc: warm dma err");
++		return error;
++	}
++	if (!sig) {
++		BP_STAGE("emmc: warm no sig");
++		return ENXIO;
++	}
++	qcom_emmc_warm = 3;
++	BP_STAGE("emmc: warm EFI PART");
++	return 0;
++}
++
+ static int
+ emmc_device_init(void)
+ {
+@@ -923,17 +1026,14 @@ emmc_device_init(void)
+ 		}
+ 	}
+ 	/*
+-	 * boot-irq57: drive the host as SDHCI 4.x and use the layout that goes with
+-	 * it. E5's NativeEmmc (UniXNU-e5, scripts/emmc/NativeEmmc.cpp) reads the
+-	 * whole GPT on a v4 host and its header documents the exact failure this
+-	 * driver was hitting: with V4EN set, the 32-bit block count lives at 0x00
+-	 * and the system address at 0x58/0x5c; writing the v3 count at 0x06 leaves
+-	 * the real count zero and the controller reports a transfer that moved no
+-	 * data, so the buffer port returns its previous word ("EFI EFI ").
+-	 * Program V4EN + 64-bit addressing, read it back, and let su.v4 decide the
+-	 * block-count/system-address registers everywhere else.
++	 * boot-irq57 tried to force the host into SDHCI 4.x here (HC2 = 0x3000).
++	 * boot-irq57's own photo showed the bootloader had left HC2 = 0x0003
++	 * (V4EN clear), and after the forced write every data phase timed out while
++	 * CMD13/CMD8 command phases still worked. So this host is a v3 layout in
++	 * practice; use the boot value instead of forcing V4EN. The v4 register
++	 * branches stay for a host that really boots with V4EN set, but they are
++	 * selected by the readback, not by this driver's wish.
+ 	 */
+-	hc_wr16(SDHCI_HOST_CONTROL2, SDHCI_HC2_V4EN | SDHCI_HC2_64BIT);
+ 	{
+ 		uint16_t hc2 = hc_rd16(SDHCI_HOST_CONTROL2);
+ 
+@@ -1626,6 +1726,32 @@ qcom_emmc_init(void)
+ 	sirius_emmc_state = hc_rd(SDHCI_PRESENT_STATE);
+ 	sirius_emmc_clock = hc_rd16(SDHCI_CLOCK_CONTROL);
+ 	sirius_emmc_power = hc_rd8(0x29);	/* Power Control: no macro in this file */
++	/*
++	 * boot-irq58: warm-inherit path first.  E5's NativeEmmc reads LBA1 in the
++	 * bootloader's live state (CMD13 + SDMA) before re-identifying, because the
++	 * full reset/POR/power sequence destroys the vendor DLL and bus state the
++	 * bootloader had already set up for its own eMMC reads.  If this read
++	 * delivers EFI PART, keep that state, parse the GPT and never touch
++	 * CORE_VENDOR_SPEC, the clock, the rails or SWRST_ALL.
++	 */
++	su.base_mhz = (sirius_emmc_caps >> 8) & 0xffu;
++	if (!su.base_mhz) {
++		su.base_mhz = 100u;
++	}
++	BP_STAGE("emmc: warm try");
++	if (emmc_warm_probe() == 0) {
++		BP_STAGE("emmc: warm gpt");
++		lck_mtx_lock(&qcom_emmc_lock);
++		error = emmc_find_partition(want);
++		lck_mtx_unlock(&qcom_emmc_lock);
++		if (!error) {
++			goto have_partition;
++		}
++		/* The warm state delivered a GPT header but not the requested
++		 * partition; keep it rather than resetting a working card. */
++		return error;
++	}
++
+ 	/*
+ 	 * Route the default MCLK to the pad before any rate change, the way
+ 	 * sdhci-msm's msm_set_clock does. Read-modify-write so the other vendor bits
+@@ -1683,6 +1809,7 @@ qcom_emmc_init(void)
+ 		return error;
+ 	}
+ 
++have_partition:
+ 	su.bmajor = bdevsw_add(-1, &qcom_emmc_bdevsw);
+ 	if (su.bmajor < 0) {
+ 		return ENXIO;

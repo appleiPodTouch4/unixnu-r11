@@ -1,0 +1,33 @@
+diff --git a/pexpert/arm/native-dwc3-console.c b/pexpert/arm/native-dwc3-console.c
+index 5df181f..9a8bade 100644
+--- a/pexpert/arm/native-dwc3-console.c
++++ b/pexpert/arm/native-dwc3-console.c
+@@ -158,7 +158,7 @@ static void stall_setup(void)
+ 
+ static const uint8_t device_descriptor[] = {18,1,0,2,2,0,0,64,0x25,5,0xa7,0xa4,0,2,1,2,3,1};
+ static uint8_t configuration_descriptor[] = {
+-    9,2,67,0,2,1,0,0xc0,50, 9,4,0,0,1,2,2,0,0,
++    9,2,67,0,2,1,0,0xc0,50, 9,4,0,0,1,2,0,0,0,
+     5,0x24,0,0x10,1, 5,0x24,1,0,1, 4,0x24,2,2, 5,0x24,6,0,1,
+     7,5,0x82,3,16,0,9, 9,4,1,0,2,0xa,0,0,0,
+     7,5,0x81,2,0,2,0, 7,5,1,2,0,2,0
+@@ -305,11 +305,19 @@ void unixnu_dwc3_poll(void)
+                 write_reg(DCFG, read_reg(DCFG) & ~(127u << 3));
+                 if (kind == 1) arm_setup();
+             } else if (kind == 2) {
++                /* Bus reset: the host has seen us.  EP0 must get a fresh SETUP TRB,
++                 * otherwise the address/descriptor phase never starts and the panel
++                 * stays at phase 5 (irq75: u=5/0/5533300a). */
+                 unixnu_dwc3_phase = 5;
++                configured = false; command_position = 0;
++                ep0_state = 0; status_started = false;
++                for (unsigned ep = 0; ep < EP_COUNT; ep++) end_transfer(ep);
++                write_reg(DCFG, read_reg(DCFG) & ~(127u << 3));
+                 packet_size = ((read_reg(DSTS) & 7) == 0) ? 512 : 64;
+                 configuration_descriptor[57] = (uint8_t)packet_size; configuration_descriptor[58] = (uint8_t)(packet_size >> 8);
+                 configuration_descriptor[64] = (uint8_t)packet_size; configuration_descriptor[65] = (uint8_t)(packet_size >> 8);
+                 (void)endpoint(0, 0, 64, true); (void)endpoint(1, 0, 64, true);
++                arm_setup();
+             }
+         }
+         write_reg(GEVNTCOUNT, 4);

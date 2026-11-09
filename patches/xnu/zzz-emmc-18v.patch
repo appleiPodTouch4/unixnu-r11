@@ -1,0 +1,36 @@
+# R11: force 1.8 V card I/O (POWER_CONTROL=0x0b, HC2 bit3) before the first data read.
+#
+# HuajiFruit/UniXNU-sirius (Xiaomi Mi 8 SE, SDM710/SDCC1 eMMC) documents the exact
+# failure this board shows: vqmmc is fixed at 1.8 V while the controller is left at
+# 3.0 V; commands survive the mismatch, multi-line data does not.  Its probe sets
+# POWER_CONTROL=0x0b and HOST_CONTROL2 |= 0x08 before reading LBA1, and PIO then
+# delivers EFI PART.  It also stays 8-bit, uses HS_TIMING 1 at 25/50 MHz, and never
+# forces 1-bit or HS400.
+#
+# Our irq65-69 ran with POWER_CONTROL=0x0f (3.3 V) and HC2 bit3 clear; that is the
+# stale "EFI EFI "/EXT_CSD-zero symptom.  This patch sets both after CMD7/CMD13 and
+# the HS_TIMING=0 switch, before the PIO LBA1 read, and leaves the PIO-only 8-bit path
+# unchanged otherwise.
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 3077a47..208a8ed 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1506,6 +1506,18 @@ emmc_device_init(void)
+ 		    SDHCI_HC_WIDTH_8));
+ 		qcom_emmc_c6_bw = 0;
+ 		delay(1000);	/* let the timing switch settle before the first data command */
++
++		/*
++		 * boot-irq70: sirius shows this board class keeps vqmmc at 1.8 V while the
++		 * controller is left at 3.0 V; commands survive that mismatch but multi-line
++		 * data does not.  irq65-69 ran with POWER_CONTROL=0x0f (3.3 V), which is
++		 * exactly the stale-data symptom.  Force 1.8 V bus power and 1.8 V signalling
++		 * just before the first data read, after the PMIC handshake is done.
++		 */
++		hc_wr8(0x29, 0x0bu);	/* SDHCI Power Control: 1.8 V bus power on */
++		hc_wr16(SDHCI_HOST_CONTROL2,
++		    (uint16_t)(hc_rd16(SDHCI_HOST_CONTROL2) | 0x0008u));
++		delay(1000);
+ 	}
+ 
+ 	/*

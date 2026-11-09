@@ -437,7 +437,101 @@ kernel_args = [
   # status line later in draw(), which is why irq52's emmc2 row was invisible.
   # irq54: the data-phase instruments get row 3 to themselves (the static TCR/TTBR text is
   # gone), so "emmc2 bs=.. bc=.. dat=.. sdm=.." is short, always visible and never overwritten.
-  "sheng-build-tag=irq54",
+  # irq55: the card keeps the bus width CMD6 gave it across warm reboots, so it is switched
+  # back to 1-bit (and the host set to 1-bit) before the block reads.
+  # irq56: irq55's forced 1-bit switch was the wrong variable (it broke the data phase), so
+  # that patch is out of the series again. This image changes only the block clock: CMD17
+  # runs at the ~400 kHz identification rate, with real SDMA (address written, DMA enabled)
+  # and a Transfer-Complete-gated PIO copy of the same block, then a CMD13 status check.
+  # irq57: the E5 port (Enceka/UniXNU-e5, NativeEmmc.cpp) shows the real difference: this
+  # host is SDHCI 4.x (HC2 V4EN), where the block count is the 32-bit register at 0x00 and
+  # the system address lives at 0x58/0x5c. The driver was writing the v3 count at 0x06, so
+  # the real count stayed zero and the port returned its previous word ("EFI EFI "). irq57
+  # programs V4EN+64-bit addressing, uses the v4 count/address and the v4 clock divider,
+  # selects SDMA explicitly, and drops the CMD6 width/HS switch (E5 reads GPT in 1-bit
+  # default speed).
+  # irq58: irq57's photo settled it: bootloader HC2 was 0x0003 (V4EN=0), and forcing V4EN
+  # made every data phase time out. irq58 tried E5's warm-inherit read (CMD13 + SDMA) before
+  # the reset/clock/power changes; that image black-screened on device.
+  # irq59: read-only boot-state probe. Enable the GCC gates, publish hc1/hc2/clock/present
+  # state/vendor spec before the normal path touches anything, then run the ordinary
+  # re-identification (v3 layout). No card command or data transfer is issued first.
+  # irq60: black-screen isolation. Only the UEFI charger watchdog configuration changes:
+  # Binaries/r11/RawFiles/QcomChargerCfg.cfg EnableChargerWdog 1 -> 0. The XNU payload is
+  # the irq59 boot-state kernel; if the ~minutes black screen disappears, the PMIC charger
+  # watchdog was the cause. The warm ADMA2 eMMC candidate stays staged, not enabled.
+  # irq61: irq60 did not black -> charger watchdog confirmed and stays disabled. The irq59
+  # photo showed HC1=0x38 (8-bit + ADMA64), CLK=0x0007 (~100 MHz), VSPEC=0x240a0e (HS400
+  # select-in/DLL). This image keeps that boot state and reads LBA1 through ADMA2 (16-byte
+  # descriptor), no SWRST_DAT/HC1/clock/POR; EFI PART keeps the state and parses the GPT.
+  # irq62: panel-only fix. The match-pass REG row drew on row 3 and overwrote the eMMC
+  # w/hc1/hc2/bs/bc/sdm/ok/st/de line in the irq61 photo. Move REG to row 28; kernel/eMMC
+  # code is unchanged from irq61.
+  # irq63: irq62 showed w=1, st=00000000 -- the warm probe stopped at CMD13 because UEFI
+  # left the card deselected. Send CMD7 RCA1 (R48, no busy) before CMD13, then ADMA2; keep
+  # HC1=0x38/CLK/VSPEC untouched. irq63's build was flawed: the old CMD13 was still ahead
+  # of CMD7 and the code checked the CMD7 response against Transfer, so its w=1 is invalid.
+  # irq64: corrected order (CMD7 -> CMD13 -> ADMA2) and single-step w codes: 1 boot state,
+  # 2 CMD7 failed, 3 CMD13 failed, 4 ADMA failed, 5 EFI PART kept. Photo: w=2, st=0 ->
+  # CMD7 RCA1 failed; card unselected/unpowered at handoff.
+  # irq65: irq55 (PIO, no SDMA) did not black, irq56+ (SDMA probe) did. Drop the normal
+  # path's SDMA LBA1 probe and use PIO only; warm CMD7 stays diagnostic (expected w=2).
+  # irq66: irq65 stayed alive (SDMA was the black cause) but LBA1 still read "EFI EFI " and
+  # EXT_CSD zero -- card still HS400, host 1-bit. Clear CMD6 HS_TIMING=0 then BUS_WIDTH=0,
+  # then the existing PIO reads.
+  # irq67: the HS reset did not move d1, and hs0/bw1 scrolled out. Publish each CMD6 as
+  # (error<<24)|busy-timeout|R1 on the EMMC2 row (c6=hs/bw) to see whether the card
+  # accepted the switch or returned SWITCH_ERROR. Photo: c6=00800900/00800900 -> both
+  # commands R1=0x900 (accepted) but DAT0 busy timed out at 200 ms; data was read while
+  # busy and timed out (e=cc04).
+  # irq68: wait 2 s for each R1b busy, stop before data on busy, 1 ms settle. Photo:
+  # HS_TIMING c6=00000900 succeeded, but BUS_WIDTH then wedged (CMD inhibit, init 60).
+  # irq69: do HS_TIMING=0 only, skip BUS_WIDTH, keep card/host 8-bit, PIO data.
+  # irq70: UniXNU-sirius shows the same class of board with vqmmc=1.8 V while the
+  # controller was left at 3.0 V; commands survive, data does not. irq65-69 ran
+  # POWER_CONTROL=0x0f. Force 0x0b + HC2 bit3 before the PIO read. Photo: HS0 was
+  # accepted but DAT0 busy timed out; the 1.8 V write was after HS0 and never ran.
+  # irq71: move 1.8 V before CMD7/CMD13/HS0, matching sirius's prepare order.
+  # irq72: after eMMC init returns an error, keep the panel 30 s then reboot with
+  # RB_QUICK|RB_NOSYNC, so a failed run does not need a manual power cycle. Photo: it
+  # reached IOPlatformExpert and panicked "Halt/Restart Timed Out" instead.
+  # irq73: call PE_halt_restart(kPERestartCPU) directly, bypassing the shutdown
+  # notification timer.
+  # irq74: auto-reboot removed; native DWC3 USB2 CDC ACM console added (port of
+  # UniXNU-zeta), ADT supplies base 0x0a800000.
+  # irq75: add R11 QUSB2 PHY init at 0xc012000 (stock DTS sequence), QSCRATCH
+  # session at 0xa8f8810, and panel u=phase/error/gsnpsid diagnostics.
+  # irq76: irq75 reached u=5 (bus reset) but never SETUP; re-arm EP0 on reset and
+  # set the ACM interface protocol to 0.
+  # irq77: no-data control requests need an explicit status stage; u=5 persisted
+  # because SET_ADDRESS/SET_CONFIGURATION never completed.
+  # irq78: defer DCFG address until status completes, status after data stages, and
+  # show USB resets/setups/status/event/command counters on row 28.
+  # irq79: record last SETUP and status/EP0 completion counters; compact USB row.
+  # irq80 was not shipped: the zeta host test said data type 3, but the UEFI DWC3
+  # header says CONTROL_DATA=5, STATUS2=3, STATUS3=4. Reverted.
+  # irq81: status stage endpoint direction fixed (IN status on EP1, OUT status on EP0).
+  # irq82: USB CDC serial parked (still u=5); DWC3 patches/ADT/panel rows removed.
+  # EMMC code remains irq71 (early 1.8 V + HS0 + 8-bit PIO).
+  # irq83: remove HS0/BUS_WIDTH switch; card default 1-bit + host HC1=0 + 1.8 V + PIO,
+  # following UniXNU-e5's default-speed/1-bit path. Photo: d1 still EFI EFI.
+  # irq84: warm RCA scan 1..8 + PIO LBA1 in inherited 8-bit/HS400 state; no ADMA64.
+  # Photo: warm no rca, fallback normal.
+  # irq85: skip SWRST_ALL in the normal path; it stays asserted here and leaves the
+  # host half-reset (E5 avoids RESET_ALL).
+  # irq86: clover (same SDM660 SDCC) fix: program GCC sdcc1_apps_clk_src to 400 kHz
+  # (the SDHCI divider is ignored) and clear VENDOR_SPEC3 alt FIFO bit 10.
+  # Photo: hung before "clk 400k id"/v3; GCC clock write is the new blocker.
+  # irq87: skip the GCC clock write for now; keep the alt-FIFO clear only.
+  # Photo: CMD1 busy -> 200 MHz root still too fast; GCC 400k is required.
+  # irq88: GCC 400k again, but stop clock + RESET_CMD|DATA 0x06 first, with stages.
+  # Photo: gcc up 1/done, v3 6440->6040, then pwr no event and stuck.
+  # irq89: skip the PMIC handshake/probe; clover just sets 1.8 V and proceeds.
+  # Photo: cmd0 ok, GCC/FIFO/CMD0 all work; no CMD1 result yet.
+  # irq90: after GCC 400k set the SDHCI divider to 0 (clover), not 249.
+  # Photo: CMD1 still mute; divider was not the blocker.
+  # irq91: restore CORE_PWRCTL handshake/probe; keep GCC/FIFO/divider=0.
+  "sheng-build-tag=irq91",
   # boot-irq11b.img was this list + this line on the irq11 kernel; from irq12 on
   # it is part of the main line: the timer handler also calls rtclock_intr(0),
   # because without it the first tick only counts and re-arms CNTV_CVAL, XNU's

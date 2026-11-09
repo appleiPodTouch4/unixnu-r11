@@ -1,0 +1,63 @@
+# R11: select the bootloader RCA, then CMD13, then the warm ADMA2 read.
+#
+# boot-irq62 exposed the warm result: w=1, st=00000000, hc1=00/38, so the probe
+# stopped at CMD13 while the controller still had the ADMA64/HS400 state.  UEFI/
+# SdccDxe hands the card over deselected.
+#
+# boot-irq63 tried CMD7 but was built with the original CMD13 still ahead of it and
+# checked the CMD7 response against the Transfer bits, so its w=1 is not a valid
+# RCA test (stray CMD13 could also leave the command line stuck).  This patch is
+# the corrected sequence and gives the panel single-step codes:
+#
+#   CMD7 RCA1 (R48, no R1b busy)
+#   CMD13 (require CURRENT_STATE=Transfer)
+#   one CMD17 LBA1 through the 16-byte ADMA2 descriptor
+#
+# HC1=0x38, CLK=0x0007, VSPEC=0x240a0e stay untouched; no SWRST_DAT.
+# qcom_emmc_warm: 1 boot state read, 2 CMD7 attempted/failed, 3 CMD7 ok /
+# CMD13 attempted, 4 CMD13 ok / ADMA attempted, 5 EFI PART kept.
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index a1cf11e..c11591b 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1054,6 +1054,22 @@ emmc_warm_probe(void)
+ 	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
+ 	hc_wr8(SDHCI_TIMEOUT_CONTROL, 0x0eu);
+ 
++	qcom_emmc_warm = 2;
++	/*
++	 * boot-irq63: UEFI/SdccDxe hands the card over deselected, so CMD13 alone
++	 * returned nothing (irq62: w=1, st=0).  Select the bootloader RCA first with
++	 * CMD7/R48 -- no R1b busy, the same shape the normal path uses -- and keep
++	 * HC1=0x38 / CLK=0x0007 / VSPEC=0x240a0e untouched.
++	 */
++	error = emmc_cmd(7, 1u << 16,
++	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, st, NULL, 0);
++	if (error) {
++		BP_STAGE("emmc: warm c7 err");
++		return 1;
++	}
++	BP_STAGE("emmc: warm c7 ok");
++
++	qcom_emmc_warm = 3;
+ 	error = emmc_cmd(13, 1u << 16,
+ 	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, st, NULL, 0);
+ 	qcom_emmc_st13 = st[0];
+@@ -1064,7 +1080,7 @@ emmc_warm_probe(void)
+ 	su.rca = 1;
+ 	BP_STAGE("emmc: warm c13 ok");
+ 
+-	qcom_emmc_warm = 2;
++	qcom_emmc_warm = 4;
+ 	bzero(warm_blk, sizeof(warm_blk));
+ 	error = emmc_adma_read(17, 1u, warm_blk);
+ 	for (unsigned i = 0; i < sizeof(warm_blk); i++) {
+@@ -1090,7 +1106,7 @@ emmc_warm_probe(void)
+ 		return 1;
+ 	}
+ 	su.adma = true;
+-	qcom_emmc_warm = 3;
++	qcom_emmc_warm = 5;
+ 	BP_STAGE("emmc: warm EFI PART");
+ 	return 0;
+ }

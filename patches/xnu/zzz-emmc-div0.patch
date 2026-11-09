@@ -1,0 +1,23 @@
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 4eb9651..c6049e2 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -517,8 +517,17 @@ emmc_gcc_400k(void)
+ static void
+ emmc_clock_set_rate(uint32_t khz)
+ {
++	int gcc_400k = -1;
+ 	if (khz == 0 || khz == 400) {
+-		(void)emmc_gcc_400k();
++		gcc_400k = emmc_gcc_400k();
++	}
++	if (gcc_400k == 0) {
++		/* clover's root clock is already 400 kHz; the SDHCI divider must be 0,
++		 * not the v3 field that assumes a 200 MHz base. */
++		emmc_clock_set(0);
++		su.clock_khz = 400;
++		su.clock_div = 0;
++		return;
+ 	}
+ 	uint32_t base = su.base_mhz ? su.base_mhz * 1000u : 200000u;
+ 	uint64_t deadline = timeout_ns(100000ull * NSEC_PER_USEC);

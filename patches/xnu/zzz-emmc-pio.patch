@@ -1,0 +1,86 @@
+# R11: normal eMMC path is PIO-only -- drop the SDMA probe that irq56 introduced.
+#
+# boot-irq64's photo: w=2, st=00000000, hc1=00/38, hc2=0000/0003, bs=bc=sdm=ok=0.
+# w=2 is CMD7 failing: at handoff the card does not answer RCA1, consistent with
+# UEFI/SdccDxe having deselected (or powered down) the card.  The ordinary path then
+# runs and is still in its power/voltage probe at 281 s (EMMC st=1266, e=0001, p=00).
+#
+# irq55 (PIO, no SDMA) did not black; irq56 added emmc_sdma_read() to the normal LBA1
+# probe and every later image blacked.  This patch removes that normal-path SDMA read
+# and leaves the first data command on the buffer port:
+#
+#   - PIO CMD17 LBA1 only; qcom_emmc_r2/d2q stay zero, look at d1/r1;
+#   - emmc_read_blocks keeps PIO CMD18 because su.dma is never set;
+#   - the warm ADMA2 probe and its CMD7 step remain, but CMD7 is expected to fail
+#     (w=2) while the card is unselected/unpowered.
+#
+# Goal: separate "the normal path's SDMA wedges SDCC" from "the card/host state is
+# wrong".  If this stays alive and PIO returns EFI PART, SDMA was the regression; if
+# it stays alive but PIO fails, the state/timing is next; if it still blacks, SDMA is
+# not the whole story.
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index c11591b..370ed59 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1510,13 +1510,12 @@ emmc_device_init(void)
+ 	 * the card's own data phase is. A static buffer keeps the block off the stack.
+ 	 */
+ 	{
+-		static uint8_t dma_blk[512];
+ 		static uint8_t gpt_blk[512];
+ 		uint32_t gr[4] = { 0, 0, 0, 0 };
+ 		uint32_t st_resp[4] = { 0, 0, 0, 0 };
+-		unsigned dnz = 0, gnz = 0;
+-		int dsig, sig;
+-		int derr, rerr, sterr;
++		unsigned gnz = 0;
++		int sig;
++		int rerr, sterr;
+ 
+ 		/* Start the data path from a known state: a previous transfer that never
+ 		 * reported Transfer Complete leaves DAT logic latched. */
+@@ -1531,23 +1530,15 @@ emmc_device_init(void)
+ 			hc_wr16(SDHCI_INT_STATUS, 0xffffu);
+ 		}
+ 
+-		/* 1) DMA: address + DMA-enable, completion from the controller itself. */
+-		bzero(dma_blk, sizeof(dma_blk));
+-		derr = emmc_sdma_read(17, 1u, dma_blk);	/* READ_SINGLE_BLOCK, LBA 1 */
+-		for (unsigned i = 0; i < sizeof(dma_blk); i++) {
+-			if (dma_blk[i]) {
+-				dnz++;
+-			}
+-		}
+-		dsig = (dma_blk[0] == 'E' && dma_blk[1] == 'F' && dma_blk[2] == 'I' &&
+-		    dma_blk[3] == ' ' && dma_blk[4] == 'P' && dma_blk[5] == 'A' &&
+-		    dma_blk[6] == 'R' && dma_blk[7] == 'T');
+-		qcom_emmc_r2 = ((unsigned)(derr & 0xff) << 24) |
+-		    ((unsigned)(dsig & 1) << 16) | (dnz & 0xffffu);
++		/*
++		 * boot-irq65: normal path is PIO-only.  irq55 (PIO, no SDMA) did not
++		 * black-screen, while irq56+ added the SDMA probe and every later image
++		 * did; irq64 also showed the warm CMD7 cannot select the card at handoff.
++		 * Drop the normal SDMA read so the first data command goes through the
++		 * buffer port, and leave d2/r2 at zero.
++		 */
++		qcom_emmc_r2 = 0;
+ 		qcom_emmc_d2q = 0;
+-		for (unsigned i = 0; i < 8; i++) {
+-			qcom_emmc_d2q = (qcom_emmc_d2q << 8) | dma_blk[i];
+-		}
+ 
+ 		/* 2) PIO: same command, buffer port drained only after Transfer Complete. */
+ 		rerr = emmc_cmd(17, 1u, /* READ_SINGLE_BLOCK, LBA 1 */
+@@ -1576,12 +1567,6 @@ emmc_device_init(void)
+ 		sterr = emmc_cmd(13, su.rca << 16,
+ 		    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, st_resp, NULL, 0);
+ 		qcom_emmc_st13 = st_resp[0];
+-		{
+-			char line[64];
+-			snprintf(line, sizeof(line), "emmc: dma e%d nz %u sig %d",
+-			    derr, dnz, dsig);
+-			BP_STAGE(line);
+-		}
+ 		{
+ 			char line[64];
+ 			snprintf(line, sizeof(line), "emmc: r1 e%d nz %u sig %d",

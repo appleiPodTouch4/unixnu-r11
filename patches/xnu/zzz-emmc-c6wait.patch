@@ -1,0 +1,60 @@
+# R11: wait 2 s for CMD6 R1b busy, and stop before data if the card is still busy.
+#
+# boot-irq67's c6=00800900/00800900 decodes cleanly:
+#   high byte 0x00   command error 0
+#   bit 23 0x800000  DAT0 busy did NOT clear within 200 ms
+#   low 24 0x000900  R1 = Transfer, no SWITCH_ERROR
+# So both HS_TIMING=0 and BUS_WIDTH=0 were accepted by the card, but the code moved on
+# while the card still held DAT0 busy; the PIO LBA1 then timed out at Transfer Complete
+# (EMMC e=cc04) and returned the stale "EFI EFI " word.
+#
+# This patch waits 2 s for each R1b busy, prints hs0 busy/bw1 busy and returns
+# ETIMEDOUT instead of issuing the next command while the switch is incomplete, and
+# adds a 1 ms settle before the first data command.  c6=00000900/00000900 (no
+# 0x800000) means the switch really completed.
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 540e7c1..d2c9b92 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1477,7 +1477,7 @@ emmc_device_init(void)
+ 		    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
+ 		r1 = resp[0];
+ 		if (!error) {
+-			busy = timeout_ns(200ull * NSEC_PER_MSEC);
++			busy = timeout_ns(2000ull * NSEC_PER_MSEC);
+ 			while (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_DAT0_LOW) {
+ 				if (!wait_deadline(busy)) {
+ 					busyto = 1;
+@@ -1490,13 +1490,19 @@ emmc_device_init(void)
+ 		}
+ 		qcom_emmc_c6_hs = ((unsigned)(error & 0xff) << 24) |
+ 		    (r1 & 0xffffffu) | (busyto ? 0x800000u : 0u);
++		if (busyto) {
++			/* The R1 landed but the card is still driving DAT0 busy; do
++			 * not send BUS_WIDTH/data while the switch is incomplete. */
++			BP_STAGE("emmc: hs0 busy");
++			return ETIMEDOUT;
++		}
+ 
+ 		error = emmc_cmd(6, 0x03b70000u, /* EXT_CSD[183] = 0, 1-bit, R1b */
+ 		    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
+ 		r1 = resp[0];
+ 		busyto = 0;
+ 		if (!error) {
+-			busy = timeout_ns(200ull * NSEC_PER_MSEC);
++			busy = timeout_ns(2000ull * NSEC_PER_MSEC);
+ 			while (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_DAT0_LOW) {
+ 				if (!wait_deadline(busy)) {
+ 					busyto = 1;
+@@ -1509,6 +1515,11 @@ emmc_device_init(void)
+ 		}
+ 		qcom_emmc_c6_bw = ((unsigned)(error & 0xff) << 24) |
+ 		    (r1 & 0xffffffu) | (busyto ? 0x800000u : 0u);
++		if (busyto) {
++			BP_STAGE("emmc: bw1 busy");
++			return ETIMEDOUT;
++		}
++		delay(1000);	/* let the switch settle before the first data command */
+ 	}
+ 
+ 	/*

@@ -1,0 +1,138 @@
+# R11: read-only boot-state probe; irq58's warm read black-screened.
+#
+# boot-irq57's photo recorded hc2=3000/0003 (bootloader V4EN clear); forcing V4EN
+# made all data phases time out.  boot-irq58 then tried E5's warm-inherit read
+# (CMD13 + SDMA LBA1) before the GCC clock gates were enabled and before the normal
+# path ran, and the device black-screened.  This patch is deliberately read-only:
+#
+#   - use the boot HC2 value (v3 on this board) instead of forcing V4EN;
+#   - enable the GCC gates (idempotent, no card-state change) and publish
+#     HC1/HC2/clock/present-state/CORE_VENDOR_SPEC before CORE_VENDOR_SPEC is
+#     overwritten or SWRST_ALL runs;
+#   - issue no card command and no data transfer before the ordinary path.
+#
+# HC1 shows the bootloader's bus width / HS / DMA select, PRESENT_STATE whether the
+# card is inserted/selected/inhibited, and CORE_VENDOR_SPEC whether the HS400
+# select-in/DLL path was left active -- the facts needed before a safe warm-inherit
+# retry.
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 11ad764..4b26bb0 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -132,6 +132,16 @@ volatile unsigned int qcom_emmc_r2, qcom_emmc_sdma_phys, qcom_emmc_sdma_ok,
+  * Host Control 1 (DMA select / bus width), v4 whether V4EN stuck.
+  */
+ volatile unsigned int qcom_emmc_hc1, qcom_emmc_hc2, qcom_emmc_hc2_boot, qcom_emmc_v4;
++/*
++ * boot-irq59: the eMMC state the bootloader left, read-only.  hc1_boot is Host
++ * Control 1 (bus width / HS / DMA select), hc2_boot Host Control 2 (V4EN), clk_boot
++ * the clock control divider, ps_boot PRESENT_STATE (card inserted/selected/inhibit)
++ * and vspec_boot CORE_VENDOR_SPEC (the HS400 select-in/DLL path).  irq58 tried a
++ * warm CMD13 + SDMA read from this state and black-screened; irq59 only observes it
++ * before the normal re-identification runs.
++ */
++volatile unsigned int qcom_emmc_hc1_boot, qcom_emmc_clk_boot, qcom_emmc_ps_boot,
++    qcom_emmc_vspec_boot;
+ /* The DMA landing zone. One block (512 = EMMC_BLOCK below), page aligned so the CPU
+  * physical address is guaranteed to cover 512 contiguous bytes of one page; the block
+  * is bounced through it because a caller's buffer has no such guarantee. */
+@@ -892,6 +902,50 @@ emmc_find_partition(const char *want)
+ 	return ENOENT;
+ }
+ 
++
++/*
++ * boot-irq59: observe the eMMC state the bootloader left, read-only.
++ *
++ * boot-irq58 tried E5's warm-inherit read (CMD13 + SDMA LBA1) before the clock
++ * gates were enabled and before the normal path had a chance to run; that image
++ * black-screened on device.  This round is deliberately read-only: publish
++ * HC1/HC2/clock/present-state/vendor-spec, then let the normal path run.  No card
++ * command, no data transfer and no write to the controller is issued before the
++ * normal re-identification, so this image cannot hang the eMMC state.
++ *
++ * The values still answer the warm-inherit question: HC1 shows the bootloader's
++ * bus width / HS / DMA select, clock its divider, PRESENT_STATE whether the card
++ * is inserted/selected/inhibited, and CORE_VENDOR_SPEC whether the HS400
++ * select-in/DLL path was left active.
++ */
++static void
++emmc_boot_state_probe(void)
++{
++	uint8_t hc1 = hc_rd8(SDHCI_HOST_CONTROL);
++	uint16_t hc2 = hc_rd16(SDHCI_HOST_CONTROL2);
++	uint16_t clk = hc_rd16(SDHCI_CLOCK_CONTROL);
++	uint32_t ps = hc_rd(SDHCI_PRESENT_STATE);
++	uint32_t vs = hc_rd(CORE_VENDOR_SPEC);
++	char line[96];
++
++	qcom_emmc_hc1_boot = hc1;
++	qcom_emmc_hc1 = hc1;
++	qcom_emmc_hc2_boot = hc2;
++	qcom_emmc_hc2 = hc2;
++	qcom_emmc_clk_boot = clk;
++	qcom_emmc_ps_boot = ps;
++	qcom_emmc_vspec_boot = vs;
++	su.v4 = (hc2 & SDHCI_HC2_V4EN) != 0;
++	qcom_emmc_v4 = su.v4 ? 1u : 0u;
++	sirius_emmc_oprobe = vs;
++
++	snprintf(line, sizeof(line), "emmc: boot hc1 %02x hc2 %04x clk %04x",
++	    hc1, hc2, clk);
++	BP_STAGE(line);
++	snprintf(line, sizeof(line), "emmc: boot ps %08x vs %08x", ps, vs);
++	BP_STAGE(line);
++}
++
+ static int
+ emmc_device_init(void)
+ {
+@@ -923,17 +977,14 @@ emmc_device_init(void)
+ 		}
+ 	}
+ 	/*
+-	 * boot-irq57: drive the host as SDHCI 4.x and use the layout that goes with
+-	 * it. E5's NativeEmmc (UniXNU-e5, scripts/emmc/NativeEmmc.cpp) reads the
+-	 * whole GPT on a v4 host and its header documents the exact failure this
+-	 * driver was hitting: with V4EN set, the 32-bit block count lives at 0x00
+-	 * and the system address at 0x58/0x5c; writing the v3 count at 0x06 leaves
+-	 * the real count zero and the controller reports a transfer that moved no
+-	 * data, so the buffer port returns its previous word ("EFI EFI ").
+-	 * Program V4EN + 64-bit addressing, read it back, and let su.v4 decide the
+-	 * block-count/system-address registers everywhere else.
++	 * boot-irq57 tried to force the host into SDHCI 4.x here (HC2 = 0x3000).
++	 * boot-irq57's own photo showed the bootloader had left HC2 = 0x0003
++	 * (V4EN clear), and after the forced write every data phase timed out while
++	 * CMD13/CMD8 command phases still worked. So this host is a v3 layout in
++	 * practice; use the boot value instead of forcing V4EN. The v4 register
++	 * branches stay for a host that really boots with V4EN set, but they are
++	 * selected by the readback, not by this driver's wish.
+ 	 */
+-	hc_wr16(SDHCI_HOST_CONTROL2, SDHCI_HC2_V4EN | SDHCI_HC2_64BIT);
+ 	{
+ 		uint16_t hc2 = hc_rd16(SDHCI_HOST_CONTROL2);
+ 
+@@ -1626,6 +1677,23 @@ qcom_emmc_init(void)
+ 	sirius_emmc_state = hc_rd(SDHCI_PRESENT_STATE);
+ 	sirius_emmc_clock = hc_rd16(SDHCI_CLOCK_CONTROL);
+ 	sirius_emmc_power = hc_rd8(0x29);	/* Power Control: no macro in this file */
++	/*
++	 * boot-irq59: enable the GCC gates (idempotent, no card state change) and
++	 * publish the eMMC state the bootloader left before the normal path starts.
++	 * irq58's warm CMD13 + SDMA read from this state black-screened; this image
++	 * only observes, then runs the ordinary re-identification.
++	 */
++	su.base_mhz = (sirius_emmc_caps >> 8) & 0xffu;
++	if (!su.base_mhz) {
++		su.base_mhz = 100u;
++	}
++	error = emmc_clocks();
++	if (error) {
++		return error;
++	}
++	BP_STAGE("emmc: boot state");
++	emmc_boot_state_probe();
++
+ 	/*
+ 	 * Route the default MCLK to the pad before any rate change, the way
+ 	 * sdhci-msm's msm_set_clock does. Read-modify-write so the other vendor bits

@@ -1,0 +1,35 @@
+diff --git a/pexpert/arm/native-dwc3-console.c b/pexpert/arm/native-dwc3-console.c
+index 9a8bade..7071f86 100644
+--- a/pexpert/arm/native-dwc3-console.c
++++ b/pexpert/arm/native-dwc3-console.c
+@@ -197,14 +197,16 @@ static void handle_setup(void)
+         } else stall_setup();
+     } else if (type == 0 && request == 5 && !length && value < 128) {
+         write_reg(DCFG, (read_reg(DCFG) & ~(127u << 3)) | (value << 3));
++        status_transfer(0);
+     } else if (type == 0 && request == 9 && !length && value <= 1) {
+         configured = false; end_transfer(2); end_transfer(3); end_transfer(5);
+         write_reg(DALEPENA, 3);
+         if (value == 1) {
+             configured = endpoint(2, 2, packet_size, false) && endpoint(3, 2, packet_size, false) && endpoint(5, 3, 16, false);
+             if (configured) { unixnu_dwc3_phase = 6; (void)transfer(2, dma.receive, 512, 1); }
+-            else stall_setup();
++            else { stall_setup(); return; }
+         }
++        status_transfer(0);
+     } else if (type == 0x80 && request == 8 && length == 1) {
+         uint8_t config = configured ? 1 : 0; control_in(&config, 1, length);
+     } else if ((type == 0x80 || type == 0x81 || type == 0x82) && request == 0 && length == 2) {
+@@ -212,10 +214,12 @@ static void handle_setup(void)
+     } else if (type == 2 && request == 1 && value == 0 && !length && (index & 15) <= 2) {
+         unsigned ep = ((index & 15) << 1) | ((index >> 7) & 1);
+         (void)command(ep, 5, 0, 0, 0);
++        status_transfer(0);
+     } else if (type == 0x81 && request == 10 && length == 1 && index < 2) {
+         uint8_t alt = 0; control_in(&alt, 1, length);
+     } else if (type == 1 && request == 11 && !length && !value && index < 2) {
+         // Only alternate setting zero exists.
++        status_transfer(0);
+     } else if (type == 0xa1 && request == 0x21 && index == 0 && length == 7) {
+         control_in(line_coding, 7, length);
+     } else if (type == 0x21 && request == 0x20 && index == 0 && length == 7) {

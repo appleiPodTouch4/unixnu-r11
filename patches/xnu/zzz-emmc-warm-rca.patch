@@ -1,0 +1,105 @@
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 2f32b13..0adce02 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1059,33 +1059,57 @@ emmc_warm_probe(void)
+ 
+ 	qcom_emmc_warm = 2;
+ 	/*
+-	 * boot-irq63: UEFI/SdccDxe hands the card over deselected, so CMD13 alone
+-	 * returned nothing (irq62: w=1, st=0).  Select the bootloader RCA first with
+-	 * CMD7/R48 -- no R1b busy, the same shape the normal path uses -- and keep
+-	 * HC1=0x38 / CLK=0x0007 / VSPEC=0x240a0e untouched.
++	 * boot-irq84: UEFI/SdccDxe may leave the card deselected with an RCA that is
++	 * not 1.  Scan CMD13 over RCA 1..8 first (a selected card answers), then try
++	 * CMD7 for each RCA; keep HC1=0x38 / CLK=0x0007 / VSPEC=0x240a0e untouched.
+ 	 */
+-	error = emmc_cmd(7, 1u << 16,
+-	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, st, NULL, 0);
+-	if (error) {
+-		BP_STAGE("emmc: warm c7 err");
+-		return 1;
++	{
++		int found = -1;
++		for (unsigned rca = 1; rca <= 8; rca++) {
++			error = emmc_cmd(13, rca << 16,
++			    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, st, NULL, 0);
++			if (!error && (st[0] & 0x1f00u) == 0x900u) {
++				found = (int)rca;
++				break;
++			}
++		}
++		if (found < 0) {
++			for (unsigned rca = 1; rca <= 8; rca++) {
++				error = emmc_cmd(7, rca << 16,
++				    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, st, NULL, 0);
++				if (error) {
++					continue;
++				}
++				error = emmc_cmd(13, rca << 16,
++				    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, st, NULL, 0);
++				if (!error && (st[0] & 0x1f00u) == 0x900u) {
++					found = (int)rca;
++					break;
++				}
++			}
++		}
++		if (found < 0) {
++			BP_STAGE("emmc: warm no rca");
++			return 1;
++		}
++		su.rca = (unsigned)found;
++		qcom_emmc_st13 = st[0];
++		{
++			char line[64];
++			snprintf(line, sizeof(line), "emmc: warm rca %d st %08x", found, st[0]);
++			BP_STAGE(line);
++		}
+ 	}
+-	BP_STAGE("emmc: warm c7 ok");
+ 
+ 	qcom_emmc_warm = 3;
+-	error = emmc_cmd(13, 1u << 16,
+-	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, st, NULL, 0);
+-	qcom_emmc_st13 = st[0];
+-	if (error || (st[0] & 0x1f00u) != 0x900u) {
+-		BP_STAGE(error ? "emmc: warm c13 err" : "emmc: warm c13 state");
+-		return 1;
+-	}
+-	su.rca = 1;
+-	BP_STAGE("emmc: warm c13 ok");
+-
+-	qcom_emmc_warm = 4;
++	/*
++	 * boot-irq84: use PIO in the inherited 8-bit HS400 state instead of the
++	 * 64-bit ADMA descriptor, which has never been validated on this host.
++	 */
+ 	bzero(warm_blk, sizeof(warm_blk));
+-	error = emmc_adma_read(17, 1u, warm_blk);
++	error = emmc_cmd(17, 1u,
++	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
++	    st, warm_blk, 1);
+ 	for (unsigned i = 0; i < sizeof(warm_blk); i++) {
+ 		if (warm_blk[i]) {
+ 			nz++;
+@@ -1101,16 +1125,16 @@ emmc_warm_probe(void)
+ 		qcom_emmc_d2q = (qcom_emmc_d2q << 8) | warm_blk[i];
+ 	}
+ 	if (error) {
+-		BP_STAGE("emmc: warm adma err");
++		BP_STAGE("emmc: warm pio err");
+ 		return 1;
+ 	}
+ 	if (!sig) {
+-		BP_STAGE("emmc: warm no sig");
++		BP_STAGE("emmc: warm pio no sig");
+ 		return 1;
+ 	}
+-	su.adma = true;
++	su.adma = false;
+ 	qcom_emmc_warm = 5;
+-	BP_STAGE("emmc: warm EFI PART");
++	BP_STAGE("emmc: warm EFI PART (pio)");
+ 	return 0;
+ }
+ 

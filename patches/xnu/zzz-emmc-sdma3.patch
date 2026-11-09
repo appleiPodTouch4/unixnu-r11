@@ -1,0 +1,392 @@
+# R11: read LBA 1 at 400 kHz through the controller's DMA engine, with a PIO cross-check.
+#
+# boot-irq55's forced 1-bit CMD6 was the wrong variable: it turned a data phase that at
+# least delivered the first word into all-zero + EIO, and it is out of the series again.
+# This image changes exactly one bus parameter -- the block clock, back to the ~400 kHz
+# identification divider -- and removes the remaining host-side doubts by reading the
+# same block twice:
+#
+#   emmc_sdma_read  writes the SDMA system address (and the ADMA register pair), sets DMA
+#                   Enable in TRANSFER_MODE, and takes the completion from the controller
+#                   itself. This is the first image where DMA is actually enabled: irq52
+#                   and irq54 computed an address with ml_static_vtop() and published it,
+#                   but never programmed it, so "SDMA" and "PIO" there were the same path.
+#   emmc_cmd        for a single block, waits for Transfer Complete before draining the
+#                   buffer port, so the "CPU drained the FIFO before the card filled it"
+#                   race cannot run.
+#
+# qcom_emmc_d2q is the DMA copy of the GPT header and qcom_emmc_d1q the PIO copy; both
+# are on panel row 2 as d2/d1. A CMD13 right after the data phase puts the card's status
+# word on row 3 (st=00000900 = Transfer, no error), while sdma_ok/dmaerr say whether the
+# engine ran and what the controller reported. The DMA landing zone is page aligned so
+# the 512-byte block is physically contiguous.
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index de54e6a..6404163 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -100,15 +100,50 @@ volatile unsigned long long qcom_emmc_d1q;
+  * levels sampled right after CMD17, sdm = SDMA system address valid. */
+ volatile unsigned int qcom_emmc_bs, qcom_emmc_bc, qcom_emmc_dat, qcom_emmc_sdm;
+ /* boot-irq52: SDMA needs a physical address; pmap_kextract() is kernel-internal and the
+- * SDK copy of vm/pmap.h does not declare it, so it is declared here with a scalar
+- * signature, and the scratch address for the next data command lives here. */
+-/* ml_static_vtop() (machine_routines) turns the kernel virtual address into a physical one. */
+-static uint32_t emmc_dma_phys;
++ * SDK copy of vm/pmap.h does not declare it, so ml_static_vtop() (machine_routines)
++ * turns the virtual address into a physical one instead. boot-irq56 moved that to
++ * emmc_sdma_read(), which is the only data command that programs the DMA engine. */
++/*
++ * boot-irq56: the data phase gets two suspects that the earlier rounds never actually
++ * separated -- the host's buffer-port drain and the card's own transfer -- so the same
++ * 512-byte block is read twice:
++ *   DMA  the controller's own engine writes emmc_dma_buf and the CPU never touches the
++ *        data port. This is the first time DMA is really enabled (see SDHCI_DMA_ADDRESS);
++ *   PIO  every block read waits for Transfer Complete before it drains the port, so the
++ *        "read the FIFO faster than the card fills it" race cannot happen.
++ * d2q is the DMA copy of the GPT header (0x4546492050415254 = "EFI PART"), d1q the PIO
++ * copy that irq49..irq55 kept reporting as 0x4546492045464920 ("EFI " twice).
++ *   qcom_emmc_r1/r2 = (command error << 24) | (signature ok << 16) | nonzero bytes
++ * sdma_ok counts completed DMA transfers, dmaerr keeps (ERR_INT_STATUS << 16) |
++ * INT_STATUS of the last one, sdma_phys the address that was written to the controller,
++ * st13 the card's CMD13 status word after the data phase (0x00000900 = Transfer).
++ */
++volatile unsigned long long qcom_emmc_d2q;
++volatile unsigned int qcom_emmc_r2, qcom_emmc_sdma_phys, qcom_emmc_sdma_ok,
++    qcom_emmc_dmaerr, qcom_emmc_st13;
++/* The DMA landing zone. One block (512 = EMMC_BLOCK below), page aligned so the CPU
++ * physical address is guaranteed to cover 512 contiguous bytes of one page; the block
++ * is bounced through it because a caller's buffer has no such guarantee. */
++static uint8_t emmc_dma_buf[512] __attribute__((aligned(4096)));
+ #define BP_STAGE(text) do { if (boot_progress_stage) boot_progress_stage(text); qcom_emmc_stage = __LINE__; sirius_emmc_step = __LINE__; } while (0)
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++/* boot-irq56: arm64 defines this in osfmk/arm64/caches_asm.s but the prototype only
++ * lives in osfmk/arm/caches_internal.h, which this file does not pull in. It does
++ * clean+invalidate, i.e. the right operation on both sides of a DMA. */
++extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);
+ 
+ /* SDHCI standard register map, offsets into the host controller block. */
++/*
++ * boot-irq56: the SDMA system address. irq52/54 computed one (ml_static_vtop) and
++ * published it, but never wrote it into the controller and never set the DMA enable
++ * bit, so "SDMA" and "PIO" there exercised the same buffer-port path. SDHCI 4.x hosts
++ * take the system address from the ADMA register pair instead of 0x00, so both are
++ * written with the same value and whichever the controller decodes is right.
++ */
++#define SDHCI_DMA_ADDRESS      0x00
++#define SDHCI_ADMA_ADDRESS     0x58
++#define SDHCI_ADMA_ADDRESS_HI  0x5c
+ #define SDHCI_BLOCK_SIZE       0x04
+ #define SDHCI_BLOCK_COUNT      0x06
+ #define SDHCI_ARGUMENT         0x08
+@@ -142,6 +177,7 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+ #define SDHCI_INT_CMD_COMPLETE 0x0001u
+ #define SDHCI_INT_TX_COMPLETE  0x0002u
++#define SDHCI_INT_DMA          0x0008u
+ #define SDHCI_INT_BUF_RDY      0x0020u
+ #define SDHCI_INT_ERROR        0x8000u
+ 
+@@ -150,6 +186,7 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ #define SDHCI_BUF_READ_EN      0x0800u
+ #define SDHCI_DAT0_LOW         0x100000u
+ 
++#define SDHCI_TM_DMA_EN        0x0001u
+ #define SDHCI_TM_BLKCNT_EN     0x0002u
+ #define SDHCI_TM_AUTO_CMD12    0x0004u
+ #define SDHCI_TM_READ          0x0010u
+@@ -207,6 +244,9 @@ static struct {
+ 	uint32_t rca;
+ 	uint64_t first_block, nblocks;  /* partition, in 512-byte sectors */
+ 	uint32_t clock_div;             /* current SDCLK freq field */
++	/* boot-irq56: set once a DMA block read has completed. Every later read then goes
++	 * through the controller's engine instead of the buffer port. */
++	bool dma;
+ 	int bmajor, cmajor;
+ 	dev_t bdev;
+ 	bool ready;
+@@ -397,6 +437,105 @@ emmc_wait_int(uint16_t bit, uint64_t deadline, int clear)
+ 	return 0;
+ }
+ 
++/*
++ * boot-irq56: one 512-byte block through the controller's DMA engine.
++ *
++ * The port path (emmc_cmd's data leg) reads what the controller has latched, so it
++ * cannot tell "the card only sent one word" from "the CPU drained the buffer before
++ * the block arrived". This path removes the CPU entirely: the address goes into the
++ * controller, DMA Enable goes into TRANSFER_MODE, and the completion is the
++ * controller's own Transfer Complete. The card is the only thing left that can make
++ * the block wrong.
++ *
++ * Only single-block commands go through here (CMD17 READ_SINGLE_BLOCK, CMD8
++ * SEND_EXT_CSD), which is what makes the 512-byte bounce buffer safe: the DMA target
++ * is one page-aligned static block, and the caller's buffer is filled afterwards with
++ * a memcpy, so no caller layout is ever handed to the hardware.
++ */
++static int
++emmc_sdma_read(unsigned idx, uint32_t arg, uint8_t *out)
++{
++	uint64_t deadline = timeout_ns(CMD_TIMEOUT_NS);
++	uint32_t phys;
++	uint16_t status;
++	int error;
++
++	bzero(emmc_dma_buf, sizeof(emmc_dma_buf));
++	phys = (uint32_t)ml_static_vtop((vm_offset_t)(uintptr_t)emmc_dma_buf);
++	qcom_emmc_sdma_phys = phys;
++	qcom_emmc_sdm = phys ? 1u : 0u;
++	if (!phys) {
++		return ENXIO;
++	}
++	/*
++	 * The engine writes main memory behind the caches' back: clean whatever the CPU
++	 * has cached for the landing zone out before the transfer and invalidate it
++	 * afterwards, so the memcpy below reads what the controller wrote.
++	 */
++	FlushPoC_DcacheRegion((vm_offset_t)(uintptr_t)emmc_dma_buf, sizeof(emmc_dma_buf));
++
++	qcom_emmc_lasterr = 0xD0u;
++	error = emmc_wait(SDHCI_CMD_INHIBIT, 0, deadline);
++	if (error) {
++		return error;
++	}
++	qcom_emmc_lasterr = 0xD1u;
++	error = emmc_wait(SDHCI_DATA_INHIBIT, 0, deadline);
++	if (error) {
++		return error;
++	}
++	/* A transfer that never reported completion leaves the DAT logic latched. */
++	{
++		uint64_t d = timeout_ns(20ull * NSEC_PER_MSEC);
++
++		hc_wr8(SDHCI_SOFTWARE_RESET, 0x04u);
++		while (hc_rd8(SDHCI_SOFTWARE_RESET) & 0x04u) {
++			if (!wait_deadline(d)) {
++				break;
++			}
++		}
++	}
++	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++	hc_wr(SDHCI_DMA_ADDRESS, phys);
++	hc_wr(SDHCI_ADMA_ADDRESS, phys);
++	hc_wr(SDHCI_ADMA_ADDRESS_HI, 0);
++	hc_wr16(SDHCI_BLOCK_SIZE, EMMC_BLOCK);
++	hc_wr16(SDHCI_BLOCK_COUNT, 1);
++	hc_wr16(SDHCI_TRANSFER_MODE, SDHCI_TM_DMA_EN | SDHCI_TM_READ |
++	    SDHCI_TM_BLKCNT_EN);
++	hc_wr(SDHCI_ARGUMENT, arg);
++	hc_wr16(SDHCI_COMMAND, SDHCI_CMD(idx,
++	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA));
++	qcom_emmc_lasterr = 0xD2u;
++	error = emmc_wait_int(SDHCI_INT_CMD_COMPLETE, deadline, 1);
++	if (error) {
++		goto done;
++	}
++	qcom_emmc_lasterr = 0xD3u;
++	error = emmc_wait_int(SDHCI_INT_TX_COMPLETE | SDHCI_INT_DMA, deadline, 1);
++done:
++	status = hc_rd16(SDHCI_INT_STATUS);
++	qcom_emmc_dmaerr = ((unsigned)hc_rd16(SDHCI_ERR_INT_STATUS) << 16) | status;
++	hc_wr16(SDHCI_ERR_INT_STATUS, hc_rd16(SDHCI_ERR_INT_STATUS));
++	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++	FlushPoC_DcacheRegion((vm_offset_t)(uintptr_t)emmc_dma_buf, sizeof(emmc_dma_buf));
++	memcpy(out, emmc_dma_buf, EMMC_BLOCK);
++	if (error) {
++		uint64_t d = timeout_ns(20ull * NSEC_PER_MSEC);
++
++		hc_wr8(SDHCI_SOFTWARE_RESET, 0x04u);
++		while (hc_rd8(SDHCI_SOFTWARE_RESET) & 0x04u) {
++			if (!wait_deadline(d)) {
++				break;
++			}
++		}
++		return error;
++	}
++	qcom_emmc_sdma_ok++;
++	su.dma = true;
++	return 0;
++}
++
+ /* One command; response lands in su-resp words. data_len>0 = PIO read. */
+ static int
+ emmc_cmd(unsigned idx, uint32_t arg, uint16_t flags, uint32_t *resp,
+@@ -464,6 +603,33 @@ emmc_cmd(unsigned idx, uint32_t arg, uint16_t flags, uint32_t *resp,
+ 		resp[3] = hc_rd(SDHCI_RESPONSE + 12);
+ 	}
+ 	if (data) {
++		/*
++		 * boot-irq56: for a single block, do not touch the data port until the whole
++		 * block is in the controller's buffer. irq50 and irq51 drained it right after
++		 * Buffer Read Ready and got the first word back 128 times ("EFI EFI "), which
++		 * is exactly what a port read returns once the buffer is empty: at 1 MHz a
++		 * word takes 32 us to arrive, while 128 CPU-paced port reads finish in a few
++		 * microseconds. Waiting for Transfer Complete removes the race; this host
++		 * reports a 4096-byte maximum block length, so a 512-byte block fits.
++		 * If the controller only raises Transfer Complete after the buffer has been
++		 * drained, the wait expires and the old drain-as-it-arrives path below runs
++		 * instead -- slower, but never a new dead end.
++		 */
++		if (blocks == 1) {
++			uint64_t tc = timeout_ns(300ull * NSEC_PER_MSEC);
++
++			error = emmc_wait_int(SDHCI_INT_TX_COMPLETE, tc, 1);
++			if (!error) {
++				uint32_t *out = (uint32_t *)data;
++
++				for (uint32_t w = 0; w < EMMC_BLOCK / 4; w++) {
++					out[w] = hc_rd(SDHCI_BUFFER);
++				}
++				qcom_emmc_lasterr = 0xCC02u;	/* drain-after-TC */
++				return 0;
++			}
++			qcom_emmc_lasterr = 0xC3u;
++		}
+ 		for (uint32_t b = 0; b < blocks; b++) {
+ 			uint32_t *out = (uint32_t *)(data + (uint64_t)b * EMMC_BLOCK);
+ 			qcom_emmc_lasterr = 0xC3u;
+@@ -519,6 +685,24 @@ emmc_read_blocks(uint64_t lba, uint32_t count, uint8_t *buf)
+ {
+ 	int error;
+ 
++	/*
++	 * boot-irq56: once CMD17 has completed through the DMA engine, keep using it. One
++	 * command per block is slower than a CMD18 burst, but it needs no assumption about
++	 * the caller's buffer being physically contiguous: emmc_sdma_read bounces each
++	 * block through its own page-aligned landing zone and memcpy's it out.
++	 */
++	if (su.dma) {
++		while (count) {
++			error = emmc_sdma_read(17, (uint32_t)lba, buf);
++			if (error) {
++				return error;
++			}
++			lba++;
++			buf += EMMC_BLOCK;
++			count--;
++		}
++		return 0;
++	}
+ 	while (count) {
+ 		uint32_t n = MIN(count, PIO_CHUNK_BLOCKS);
+ 
+@@ -941,19 +1125,44 @@ emmc_device_init(void)
+ 	 * N = 24, i.e. 200 MHz/(2*24) = 4.2 MHz, still inside default-speed timing, and puts
+ 	 * a block at ~1 ms.
+ 	 */
+-	emmc_clock_set(6u);
+-	BP_STAGE("emmc: clk 4mhz");
++	/*
++	 * boot-irq56: the handoff asks for exactly one variable here -- the block clock.
++	 * irq51/52/54 read the same block at 1 MHz and at 4.2 MHz and both returned the
++	 * same "EFI EFI ", while the host-side parameters (bs/bc/sdm) were correct. Go
++	 * back to the identification clock (~400 kHz, the same divider used before CMD0)
++	 * and change nothing about the bus: no CMD6 bus-width switch, 1-bit host, same
++	 * card state. A 512-byte block then takes ~10 ms; the controller timeout is at
++	 * its maximum and the single-block read waits for Transfer Complete, so the
++	 * slower clock cannot truncate the block.
++	 *   "EFI PART" now          -> the 4.2 MHz words were a sampling-phase problem.
++	 *   0x4546492045464920      -> clock and host are ruled out; the card's own
++	 *                              data phase is the remaining suspect (CMD13 after
++	 *                              the reads reports whether it is still in Transfer).
++	 */
++	emmc_clock_set(su.base_mhz ? su.base_mhz * 1000u / 800u : 124u);
++	BP_STAGE("emmc: clk 400khz");
+ 
+ 	/*
+-	 * boot-irq43: prove the data path with a payload we can recognise before trusting
+-	 * EXT_CSD again. LBA 1 holds the GPT header, which begins with the ASCII bytes
+-	 * "EFI PART". If PIO delivers real content here, the all-zero EXT_CSD is specific
+-	 * to that command; if this reads zeros as well, the data path itself is broken and
+-	 * the next step is SDMA rather than more guessing. A static buffer keeps the
+-	 * 512-byte payload off the stack.
++	 * boot-irq43/boot-irq56: prove the data path with a payload we can recognise
++	 * before trusting EXT_CSD again. LBA 1 holds the GPT header, which begins with
++	 * the ASCII bytes "EFI PART". The same block is read twice in this image, so the
++	 * two remaining suspects are separated by the result itself:
++	 *   DMA  emmc_sdma_read() -- the controller's own engine writes memory and the
++	 *        CPU never touches the data port (this is the path the handoff asks for);
++	 *   PIO  emmc_cmd() -- now waits for Transfer Complete before it drains the port,
++	 *        so the "CPU drained the FIFO before the card filled it" race cannot run.
++	 * "EFI EFI " from both, at 400 kHz, means neither host read path is the cause and
++	 * the card's own data phase is. A static buffer keeps the block off the stack.
+ 	 */
+ 	{
++		static uint8_t dma_blk[512];
+ 		static uint8_t gpt_blk[512];
++		uint32_t gr[4] = { 0, 0, 0, 0 };
++		uint32_t st_resp[4] = { 0, 0, 0, 0 };
++		unsigned dnz = 0, gnz = 0;
++		int dsig, sig;
++		int derr, rerr, sterr;
++
+ 		/* Start the data path from a known state: a previous transfer that never
+ 		 * reported Transfer Complete leaves DAT logic latched. */
+ 		{
+@@ -966,14 +1175,26 @@ emmc_device_init(void)
+ 			}
+ 			hc_wr16(SDHCI_INT_STATUS, 0xffffu);
+ 		}
+-		uint32_t gr[4] = { 0, 0, 0, 0 };
+-		unsigned gnz = 0;
+-		int sig;
+-		int rerr;
+-		/* boot-irq52: SDMA move -- the FIFO port returned one word 128 times, so take the
+-		 * controller's own DMA path into memory instead. */
+-		emmc_dma_phys = (uint32_t)ml_static_vtop((addr64_t)(uintptr_t)gpt_blk);
+-		qcom_emmc_sdm = emmc_dma_phys ? 1u : 0u;
++
++		/* 1) DMA: address + DMA-enable, completion from the controller itself. */
++		bzero(dma_blk, sizeof(dma_blk));
++		derr = emmc_sdma_read(17, 1u, dma_blk);	/* READ_SINGLE_BLOCK, LBA 1 */
++		for (unsigned i = 0; i < sizeof(dma_blk); i++) {
++			if (dma_blk[i]) {
++				dnz++;
++			}
++		}
++		dsig = (dma_blk[0] == 'E' && dma_blk[1] == 'F' && dma_blk[2] == 'I' &&
++		    dma_blk[3] == ' ' && dma_blk[4] == 'P' && dma_blk[5] == 'A' &&
++		    dma_blk[6] == 'R' && dma_blk[7] == 'T');
++		qcom_emmc_r2 = ((unsigned)(derr & 0xff) << 24) |
++		    ((unsigned)(dsig & 1) << 16) | (dnz & 0xffffu);
++		qcom_emmc_d2q = 0;
++		for (unsigned i = 0; i < 8; i++) {
++			qcom_emmc_d2q = (qcom_emmc_d2q << 8) | dma_blk[i];
++		}
++
++		/* 2) PIO: same command, buffer port drained only after Transfer Complete. */
+ 		rerr = emmc_cmd(17, 1u, /* READ_SINGLE_BLOCK, LBA 1 */
+ 		    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
+ 		    gr, gpt_blk, 1);
+@@ -993,12 +1214,31 @@ emmc_device_init(void)
+ 		for (unsigned i = 0; i < 8; i++) {
+ 			qcom_emmc_d1q = (qcom_emmc_d1q << 8) | gpt_blk[i];
+ 		}
++
++		/* 3) CMD13 straight after the data phase: if the card dropped out of
++		 * Transfer state (or latched an error) around the CMD17, its status word
++		 * says so; 0x00000900 is Transfer with no error. */
++		sterr = emmc_cmd(13, su.rca << 16,
++		    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, st_resp, NULL, 0);
++		qcom_emmc_st13 = st_resp[0];
++		{
++			char line[64];
++			snprintf(line, sizeof(line), "emmc: dma e%d nz %u sig %d",
++			    derr, dnz, dsig);
++			BP_STAGE(line);
++		}
+ 		{
+ 			char line[64];
+ 			snprintf(line, sizeof(line), "emmc: r1 e%d nz %u sig %d",
+ 			    rerr, gnz, sig);
+ 			BP_STAGE(line);
+ 		}
++		{
++			char line[64];
++			snprintf(line, sizeof(line), "emmc: st13 %08x e%d",
++			    st_resp[0], sterr);
++			BP_STAGE(line);
++		}
+ 	}
+ 
+ 	{

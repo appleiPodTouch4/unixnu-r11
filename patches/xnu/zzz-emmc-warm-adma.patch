@@ -1,0 +1,309 @@
+# R11: warm ADMA2 read of LBA1 in the bootloader's 8-bit/HS400 state.
+#
+# boot-irq60 confirmed the minutes-later black screen was the UEFI/PMIC charger
+# watchdog: EnableChargerWdog=0 and the same XNU kernel stayed alive.  boot-irq59's
+# photo then showed what the bootloader actually left:
+#
+#   HC1 = 0x38       8-bit bus + ADMA2 64-bit
+#   HC2 = 0x0003     V4EN=0, v3 register layout
+#   CLK = 0x0007     divider 0, ~100 MHz
+#   VS  = 0x240a0e   HS400 select-in + DLL active
+#   PS  = 0x01f800f0 card inserted, CMD/DAT high, no inhibit
+#
+# irq58 tried a warm SDMA read from this state, cleared the ADMA64 DMA select and
+# did SWRST_DAT; that is a different engine/timing and black-screened.  This patch
+# keeps the boot state exactly:
+#
+#   - enable the GCC gates first (idempotent, no card-state change);
+#   - publish HC1/HC2/CLK/PS/VSPEC on the stage lines;
+#   - CMD13 on RCA 1, require Transfer with no error;
+#   - one CMD17 LBA1 through a 16-byte ADMA2 descriptor next to the page-aligned
+#     bounce buffer, with HC1/clock/VSPEC/DLL untouched and no SWRST_DAT;
+#   - EFI PART -> keep the state, set su.adma and parse the GPT with ADMA2 reads;
+#     anything else -> return to the ordinary v3 re-identification path.
+#
+# Panel row 3 is shortened back to v4/hc1/hc2/w/bs/bc/sdm/ok/st/de so st and de
+# stay inside the panel; ps/clk/vs ride the stage text.
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 4b26bb0..a1cf11e 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -142,6 +142,9 @@ volatile unsigned int qcom_emmc_hc1, qcom_emmc_hc2, qcom_emmc_hc2_boot, qcom_emm
+  */
+ volatile unsigned int qcom_emmc_hc1_boot, qcom_emmc_clk_boot, qcom_emmc_ps_boot,
+     qcom_emmc_vspec_boot;
++/* boot-irq60: 1 after the boot-state read, 2 after CMD13, 3 when the warm ADMA2
++ * LBA1 read delivered EFI PART and the driver kept the bootloader's state. */
++volatile unsigned int qcom_emmc_warm;
+ /* The DMA landing zone. One block (512 = EMMC_BLOCK below), page aligned so the CPU
+  * physical address is guaranteed to cover 512 contiguous bytes of one page; the block
+  * is bounced through it because a caller's buffer has no such guarantee. */
+@@ -275,6 +278,9 @@ static struct {
+ 	/* boot-irq56: set once a DMA block read has completed. Every later read then goes
+ 	 * through the controller's engine instead of the buffer port. */
+ 	bool dma;
++	/* boot-irq60: set when the warm ADMA2 path works; every later read uses the
++	 * bootloader's ADMA engine/descriptors instead of SDMA. */
++	bool adma;
+ 	/* boot-irq57: the host is in SDHCI 4.x mode (HC2 V4EN stuck); block count lives
+ 	 * at 0x00 and the system address at 0x58/0x5c. */
+ 	bool v4;
+@@ -638,6 +644,78 @@ done:
+ 	return 0;
+ }
+ 
++/*
++ * boot-irq60: one 512-byte block through the bootloader's ADMA2 engine.
++ *
++ * boot-irq59's photo showed the bootloader left HC1=0x38 (8-bit + ADMA64),
++ * clock=0x0007 (~100 MHz) and CORE_VENDOR_SPEC=0x240a0e (HS400 select-in/DLL).
++ * irq58 tried that state with SDMA and a DAT reset; this helper keeps the engine
++ * and bus exactly as found: it does not write HC1, the clock or the vendor
++ * registers, does not reset DAT, and uses a 16-byte ADMA2 descriptor next to the
++ * page-aligned data buffer -- the layout E5's admaRead512() uses.
++ */
++static int
++emmc_adma_read(uint32_t idx, uint32_t arg, uint8_t *out)
++{
++	volatile uint32_t *desc = (volatile uint32_t *)(void *)(emmc_dma_buf + 512);
++	uint64_t deadline = timeout_ns(CMD_TIMEOUT_NS);
++	uint32_t phys, dphys;
++	uint16_t status;
++	int error;
++
++	bzero(emmc_dma_buf, 512);
++	phys = (uint32_t)ml_static_vtop((vm_offset_t)(uintptr_t)emmc_dma_buf);
++	dphys = phys + 512;
++	desc[0] = 0x23u | (512u << 16);	/* Valid|End|Transfer, length 512 */
++	desc[1] = phys;
++	desc[2] = 0;
++	desc[3] = 0;
++	/* Clean data+descriptor out so the engine sees what the CPU wrote. */
++	FlushPoC_DcacheRegion((vm_offset_t)(uintptr_t)emmc_dma_buf, sizeof(emmc_dma_buf));
++
++	qcom_emmc_lasterr = 0xE0u;
++	error = emmc_wait(SDHCI_CMD_INHIBIT, 0, deadline);
++	if (error) {
++		return error;
++	}
++	qcom_emmc_lasterr = 0xE1u;
++	error = emmc_wait(SDHCI_DATA_INHIBIT, 0, deadline);
++	if (error) {
++		return error;
++	}
++	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++	hc_wr16(SDHCI_BLOCK_SIZE, EMMC_BLOCK);
++	if (su.v4) {
++		hc_wr(SDHCI_DMA_ADDRESS, 1);
++	} else {
++		hc_wr16(SDHCI_BLOCK_COUNT, 1);
++	}
++	qcom_emmc_bs = hc_rd16(SDHCI_BLOCK_SIZE);
++	qcom_emmc_bc = su.v4 ? hc_rd(SDHCI_DMA_ADDRESS) : hc_rd16(SDHCI_BLOCK_COUNT);
++	hc_wr(SDHCI_ADMA_ADDRESS, dphys);
++	hc_wr(SDHCI_ADMA_ADDRESS_HI, 0);
++	hc_wr16(SDHCI_TRANSFER_MODE, SDHCI_TM_DMA_EN | SDHCI_TM_READ |
++	    SDHCI_TM_BLKCNT_EN);
++	hc_wr(SDHCI_ARGUMENT, arg);
++	hc_wr16(SDHCI_COMMAND, SDHCI_CMD(idx,
++	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA));
++	qcom_emmc_lasterr = 0xE2u;
++	error = emmc_wait_int(SDHCI_INT_CMD_COMPLETE, deadline, 1);
++	if (error) {
++		goto done;
++	}
++	qcom_emmc_lasterr = 0xE3u;
++	error = emmc_wait_int(SDHCI_INT_TX_COMPLETE | SDHCI_INT_DMA, deadline, 1);
++done:
++	status = hc_rd16(SDHCI_INT_STATUS);
++	qcom_emmc_dmaerr = ((unsigned)hc_rd16(SDHCI_ERR_INT_STATUS) << 16) | status;
++	hc_wr16(SDHCI_ERR_INT_STATUS, hc_rd16(SDHCI_ERR_INT_STATUS));
++	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++	FlushPoC_DcacheRegion((vm_offset_t)(uintptr_t)emmc_dma_buf, sizeof(emmc_dma_buf));
++	memcpy(out, emmc_dma_buf, EMMC_BLOCK);
++	return error;
++}
++
+ /* One command; response lands in su-resp words. data_len>0 = PIO read. */
+ static int
+ emmc_cmd(unsigned idx, uint32_t arg, uint16_t flags, uint32_t *resp,
+@@ -803,6 +881,22 @@ emmc_read_blocks(uint64_t lba, uint32_t count, uint8_t *buf)
+ 	 * the caller's buffer being physically contiguous: emmc_sdma_read bounces each
+ 	 * block through its own page-aligned landing zone and memcpy's it out.
+ 	 */
++	/*
++	 * boot-irq60: once the warm ADMA2 read has proved the bootloader's engine,
++	 * keep using it -- same bus width, clock, DLL and descriptor layout.
++	 */
++	if (su.adma) {
++		while (count) {
++			error = emmc_adma_read(17, (uint32_t)lba, buf);
++			if (error) {
++				return error;
++			}
++			lba++;
++			buf += EMMC_BLOCK;
++			count--;
++		}
++		return 0;
++	}
+ 	if (su.dma) {
+ 		while (count) {
+ 			error = emmc_sdma_read(17, (uint32_t)lba, buf);
+@@ -904,28 +998,29 @@ emmc_find_partition(const char *want)
+ 
+ 
+ /*
+- * boot-irq59: observe the eMMC state the bootloader left, read-only.
+- *
+- * boot-irq58 tried E5's warm-inherit read (CMD13 + SDMA LBA1) before the clock
+- * gates were enabled and before the normal path had a chance to run; that image
+- * black-screened on device.  This round is deliberately read-only: publish
+- * HC1/HC2/clock/present-state/vendor-spec, then let the normal path run.  No card
+- * command, no data transfer and no write to the controller is issued before the
+- * normal re-identification, so this image cannot hang the eMMC state.
++ * boot-irq60: warm ADMA2 read of LBA1 in the bootloader's state.
+  *
+- * The values still answer the warm-inherit question: HC1 shows the bootloader's
+- * bus width / HS / DMA select, clock its divider, PRESENT_STATE whether the card
+- * is inserted/selected/inhibited, and CORE_VENDOR_SPEC whether the HS400
+- * select-in/DLL path was left active.
++ * boot-irq59's photo: HC1=0x38 (8-bit + ADMA64), clock=0x0007 (~100 MHz),
++ * CORE_VENDOR_SPEC=0x240a0e (HS400 select-in/DLL), PRESENT_STATE=01f800f0
++ * (card inserted, lines high, no inhibit).  irq58 used SDMA plus SWRST_DAT from
++ * this state and black-screened.  This probe keeps the bootloader's ADMA/8-bit/
++ * HS400 state: it does not write HC1, the clock or the vendor registers, does not
++ * reset DAT, and reads one block through the ADMA2 descriptor helper.  EFI PART
++ * keeps the state and returns 0; anything else returns 1 and the ordinary
++ * re-identification runs.
+  */
+-static void
+-emmc_boot_state_probe(void)
++static int
++emmc_warm_probe(void)
+ {
++	static uint8_t warm_blk[512];
++	uint32_t st[4] = { 0, 0, 0, 0 };
+ 	uint8_t hc1 = hc_rd8(SDHCI_HOST_CONTROL);
+ 	uint16_t hc2 = hc_rd16(SDHCI_HOST_CONTROL2);
+ 	uint16_t clk = hc_rd16(SDHCI_CLOCK_CONTROL);
+ 	uint32_t ps = hc_rd(SDHCI_PRESENT_STATE);
+ 	uint32_t vs = hc_rd(CORE_VENDOR_SPEC);
++	unsigned nz = 0;
++	int sig, error;
+ 	char line[96];
+ 
+ 	qcom_emmc_hc1_boot = hc1;
+@@ -938,12 +1033,66 @@ emmc_boot_state_probe(void)
+ 	su.v4 = (hc2 & SDHCI_HC2_V4EN) != 0;
+ 	qcom_emmc_v4 = su.v4 ? 1u : 0u;
+ 	sirius_emmc_oprobe = vs;
++	qcom_emmc_warm = 1;
+ 
+ 	snprintf(line, sizeof(line), "emmc: boot hc1 %02x hc2 %04x clk %04x",
+ 	    hc1, hc2, clk);
+ 	BP_STAGE(line);
+ 	snprintf(line, sizeof(line), "emmc: boot ps %08x vs %08x", ps, vs);
+ 	BP_STAGE(line);
++
++	if ((hc1 & 0x18u) != 0x18u) {
++		BP_STAGE("emmc: warm no adma64");
++		return 1;
++	}
++	/* Polling only: status enables and the maximum data timeout, no reset. */
++	hc_wr16(SDHCI_INT_ENABLE, SDHCI_INT_CMD_COMPLETE | SDHCI_INT_TX_COMPLETE |
++	    SDHCI_INT_BUF_RDY | SDHCI_INT_ERROR);
++	hc_wr16(SDHCI_SIGNAL_ENABLE, 0xffffu);
++	hc_wr16(0x38, 0);
++	hc_wr16(0x3a, 0);
++	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++	hc_wr8(SDHCI_TIMEOUT_CONTROL, 0x0eu);
++
++	error = emmc_cmd(13, 1u << 16,
++	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, st, NULL, 0);
++	qcom_emmc_st13 = st[0];
++	if (error || (st[0] & 0x1f00u) != 0x900u) {
++		BP_STAGE(error ? "emmc: warm c13 err" : "emmc: warm c13 state");
++		return 1;
++	}
++	su.rca = 1;
++	BP_STAGE("emmc: warm c13 ok");
++
++	qcom_emmc_warm = 2;
++	bzero(warm_blk, sizeof(warm_blk));
++	error = emmc_adma_read(17, 1u, warm_blk);
++	for (unsigned i = 0; i < sizeof(warm_blk); i++) {
++		if (warm_blk[i]) {
++			nz++;
++		}
++	}
++	sig = (warm_blk[0] == 'E' && warm_blk[1] == 'F' && warm_blk[2] == 'I' &&
++	    warm_blk[3] == ' ' && warm_blk[4] == 'P' && warm_blk[5] == 'A' &&
++	    warm_blk[6] == 'R' && warm_blk[7] == 'T');
++	qcom_emmc_r2 = ((unsigned)(error & 0xff) << 24) |
++	    ((unsigned)(sig & 1) << 16) | (nz & 0xffffu);
++	qcom_emmc_d2q = 0;
++	for (unsigned i = 0; i < 8; i++) {
++		qcom_emmc_d2q = (qcom_emmc_d2q << 8) | warm_blk[i];
++	}
++	if (error) {
++		BP_STAGE("emmc: warm adma err");
++		return 1;
++	}
++	if (!sig) {
++		BP_STAGE("emmc: warm no sig");
++		return 1;
++	}
++	su.adma = true;
++	qcom_emmc_warm = 3;
++	BP_STAGE("emmc: warm EFI PART");
++	return 0;
+ }
+ 
+ static int
+@@ -1678,10 +1827,10 @@ qcom_emmc_init(void)
+ 	sirius_emmc_clock = hc_rd16(SDHCI_CLOCK_CONTROL);
+ 	sirius_emmc_power = hc_rd8(0x29);	/* Power Control: no macro in this file */
+ 	/*
+-	 * boot-irq59: enable the GCC gates (idempotent, no card state change) and
+-	 * publish the eMMC state the bootloader left before the normal path starts.
+-	 * irq58's warm CMD13 + SDMA read from this state black-screened; this image
+-	 * only observes, then runs the ordinary re-identification.
++	 * boot-irq60: enable the GCC gates first (idempotent, no card state change),
++	 * then make one warm ADMA2 read of LBA1 in the bootloader's 8-bit/ADMA64/
++	 * HS400 state.  If it delivers EFI PART, keep that state and parse the GPT;
++	 * otherwise fall through to the ordinary re-identification.
+ 	 */
+ 	su.base_mhz = (sirius_emmc_caps >> 8) & 0xffu;
+ 	if (!su.base_mhz) {
+@@ -1691,8 +1840,19 @@ qcom_emmc_init(void)
+ 	if (error) {
+ 		return error;
+ 	}
+-	BP_STAGE("emmc: boot state");
+-	emmc_boot_state_probe();
++	BP_STAGE("emmc: warm try");
++	if (emmc_warm_probe() == 0) {
++		BP_STAGE("emmc: warm gpt");
++		lck_mtx_lock(&qcom_emmc_lock);
++		error = emmc_find_partition(want);
++		lck_mtx_unlock(&qcom_emmc_lock);
++		if (!error) {
++			goto have_partition;
++		}
++		/* A readable GPT but not the requested partition: keep the warm
++		 * state rather than resetting a working card. */
++		return error;
++	}
+ 
+ 	/*
+ 	 * Route the default MCLK to the pad before any rate change, the way
+@@ -1751,6 +1911,8 @@ qcom_emmc_init(void)
+ 		return error;
+ 	}
+ 
++
++have_partition:
+ 	su.bmajor = bdevsw_add(-1, &qcom_emmc_bdevsw);
+ 	if (su.bmajor < 0) {
+ 		return ENXIO;

@@ -1,0 +1,14 @@
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index be12512..0ebe1bb 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -493,9 +493,6 @@ emmc_gcc_400k(void)
+ static void
+ emmc_clock_set_rate(uint32_t khz)
+ {
+-	if (khz == 0 || khz == 400) {
+-		(void)emmc_gcc_400k();
+-	}
+ 	uint32_t base = su.base_mhz ? su.base_mhz * 1000u : 200000u;
+ 	uint64_t deadline = timeout_ns(100000ull * NSEC_PER_USEC);
+ 

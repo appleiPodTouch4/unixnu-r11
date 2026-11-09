@@ -1,0 +1,21 @@
+diff --git a/pexpert/arm/native-dwc3-console.c b/pexpert/arm/native-dwc3-console.c
+index 2ff7e5a..fb743eb 100644
+--- a/pexpert/arm/native-dwc3-console.c
++++ b/pexpert/arm/native-dwc3-console.c
+@@ -151,9 +151,15 @@ static void arm_setup(void)
+ }
+ static void status_transfer(unsigned ep)
+ {
++    (void)ep;
+     if (status_started || ep0_state == 0) return;
+     status_started = true; ep0_state = 2;
+-    if (transfer(ep, dma.control, 0, three_stage ? 4 : 3)) unixnu_dwc3_status_ok++;
++    /* EP0 OUT is physical 0, EP0 IN is physical 1.  Status direction is the
++     * opposite of the data stage: no data -> IN (1), data IN -> OUT (0),
++     * data OUT -> IN (1).  The zeta code passed the event's ep, but the
++     * explicit no-data path here used 0 and the status never completed. */
++    unsigned sep = (three_stage && direction_in) ? 0u : 1u;
++    if (transfer(sep, dma.control, 0, three_stage ? 4 : 3)) unixnu_dwc3_status_ok++;
+     else unixnu_dwc3_status_fail++;
+ }
+ static void stall_setup(void)

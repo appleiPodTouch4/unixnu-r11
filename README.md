@@ -11,7 +11,7 @@ here; the UEFI platform is the sibling [`uefi-r11`](../uefi-r11) tree.
 | Touch | Synaptics S3508, I2C1 `0x0C175000`, address `0x20` |
 | Storage | eMMC 5.1, 69 partitions, no A/B, `userdata` is a grow partition |
 | UEFI FD | `0x9FC00000` + `0x300000` (the window the stock XBL reserves for `UEFI FD`) |
-| OS profile | iPadOS 17.7.11 / 21H461, spoofed as iPad7,1 |
+| OS profile | iOS 16.5 / 20F66, spoofed as iPhone10,3 |
 
 ## Where the numbers come from
 
@@ -64,7 +64,7 @@ git submodule update --init --recursive          # components, kits, DarwinBoot
   --dtb ../uefi-r11-base/Platforms/OPPO/r11Pkg/DeviceTree/r11.dtb
 
 # 5. Boot without touching flash (boot is only 64 MiB, the payload is 192 MiB)
-fastboot boot out/r11/ipados-17.7.11-21H461/r11/boot/boot.img
+fastboot boot out/r11/ios-16.5-20F66/r11/boot/boot.img
 ```
 
 `../build-r11.sh` runs the same sequence: `inputs`, `base`, `config`, `kernel`,

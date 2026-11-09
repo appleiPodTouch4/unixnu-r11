@@ -1,0 +1,2 @@
+userdata-root.img 8357150720 bytes (7.78 GiB), sha256 818e4e37..., in a partition of 56933462016 bytes.
+OS 5628790272 B at 0x100000, SystemOS 2726297600 B at 0x14fa00000. Built in 1m52s from the local IPSW.

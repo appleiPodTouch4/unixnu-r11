@@ -18,8 +18,25 @@ static void bp_copy(char *out, const char *in) {
   while (n < BP_COLS-1 && in[n]) { out[n] = in[n]; ++n; }
   out[n] = 0;
 }
+// True when a stage is the mountroot retry loop rather than driver progress.
+// Once vfs_mountroot cannot find its root it repeats two alternating stages every
+// few seconds, and those push the driver\'s own stages out of the six-row history:
+// boot-irq35 answered CMD1 (p=03) yet the stage that failed was already gone.
+static int bp_stage_is_noise(const char *text) {
+  static const char *const noise[] = { "vfs_mountroot enter", "calling setconf?" };
+  for (unsigned i = 0; i < sizeof(noise)/sizeof(noise[0]); ++i) {
+    const char *n = noise[i];
+    for (const char *t = text; *t; ++t) {
+      const char *a = t, *b = n;
+      while (*a && *b && *a == *b) { ++a; ++b; }
+      if (!*b) return 1;
+    }
+  }
+  return 0;
+}
 static void bp_stage(struct bp_core *s, const char *text, unsigned now) {
   if (s->frozen) return;
+  if (bp_stage_is_noise(text)) return;
   struct bp_history *h = &s->history[s->history_count++ % BP_HISTORY];
   h->seconds = now; bp_copy(h->text, text); s->activity_at = now;
 }

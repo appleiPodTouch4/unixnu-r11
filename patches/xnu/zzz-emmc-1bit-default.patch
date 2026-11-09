@@ -1,0 +1,62 @@
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index d3da053..2f32b13 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1472,52 +1472,12 @@ emmc_device_init(void)
+ 	}
+ 
+ 	/*
+-	 * boot-irq66: force the card out of HS400 before any data read.  irq65's
+-	 * PIO-only path was stable (no black) but LBA1 still read "EFI EFI " and
+-	 * EXT_CSD came back as rev 0/sec 0: the card kept the bootloader's HS400
+-	 * timing.  Clear HS_TIMING only; the card stays 8-bit, matching the host.
++	 * boot-irq83: do NOT switch HS_TIMING/BUS_WIDTH.  CMD0/CMD1/CMD2/CMD3/CMD7
++	 * already put the card back in its default 1-bit mode; the host is 1-bit
++	 * (HC1=0) and the PHY is at 1.8 V from boot-irq71.  irq82 proved that the
++	 * HS_TIMING=0 switch itself can hang (hs0 busy), so the first data read now
++	 * happens in default speed/1-bit, the same mode UniXNU-e5's NativeEmmc uses.
+ 	 */
+-	{
+-		uint64_t busy;
+-		uint32_t r1 = 0;
+-		int busyto = 0;
+-
+-		error = emmc_cmd(6, 0x03b90000u, /* EXT_CSD[185] = 0, HS_TIMING default, R1b */
+-		    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
+-		r1 = resp[0];
+-		if (!error) {
+-			busy = timeout_ns(2000ull * NSEC_PER_MSEC);
+-			while (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_DAT0_LOW) {
+-				if (!wait_deadline(busy)) {
+-					busyto = 1;
+-					break;
+-				}
+-			}
+-			BP_STAGE("emmc: hs0 ok");
+-		} else {
+-			BP_STAGE("emmc: hs0 failed");
+-		}
+-		qcom_emmc_c6_hs = ((unsigned)(error & 0xff) << 24) |
+-		    (r1 & 0xffffffu) | (busyto ? 0x800000u : 0u);
+-		if (busyto) {
+-			/* The R1 landed but the card is still driving DAT0 busy; do
+-			 * not send BUS_WIDTH/data while the switch is incomplete. */
+-			BP_STAGE("emmc: hs0 busy");
+-			return ETIMEDOUT;
+-		}
+-
+-		/*
+-		 * boot-irq69: HS_TIMING=0 is enough.  The card is 8-bit from the
+-		 * bootloader, so keep the host 8-bit and skip the BUS_WIDTH switch that
+-		 * irq68 timed out on (and left CMD inhibit set).  PIO never needed
+-		 * 1-bit; the card is now default speed on an 8-bit bus.
+-		 */
+-		hc_wr8(SDHCI_HOST_CONTROL,
+-		    (uint8_t)((hc_rd8(SDHCI_HOST_CONTROL) & ~SDHCI_HC_DMA_MASK) |
+-		    SDHCI_HC_WIDTH_8));
+-		qcom_emmc_c6_bw = 0;
+-		delay(1000);	/* let the timing switch settle before the first data command */
+-	}
+ 
+ 	/*
+ 	 * boot-irq42: the card is selected and in Transfer state, so the identification

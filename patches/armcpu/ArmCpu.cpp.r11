@@ -1,0 +1,1412 @@
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+#include <IOKit/IOCPU.h>
+#include <IOKit/IODeviceTreeSupport.h>
+#include <IOKit/IOMemoryDescriptor.h>
+#include <libkern/c++/OSData.h>
+#include <libkern/c++/OSSymbol.h>
+#include <machine/machine_routines.h>
+#include <pexpert/pexpert.h>
+
+// Reading note (boot-irq35 cleanup): the live code never hard-codes an INTID --
+// every enable, acknowledge and audit uses gTimerIntid (line ~269), which is 30
+// on SDM660. Comments further down that say "PPI 27" are describing the earlier
+// understanding that the EL1 virtual timer was 27 the way Apple's GIC numbers it;
+// boot-irq16 disproved that on hardware (pend=40200000 while isen held bit 27
+// only). They are kept because they explain why each workaround exists, not
+// because 27 is still the number.
+
+// Exact private entry from Darwin 23 arm/rtclock.h. Its full data header is
+// not exported to IOKit; the IRQ path calls the real kernel implementation.
+extern "C" void rtclock_intr (unsigned int);
+// Kernel-internal entries used for secondary CPU startup (Darwin 23 osfmk).
+extern "C" vm_offset_t ml_static_vtop (vm_offset_t);
+extern "C" char LowResetVectorBase[], LowResetVectorEnd[], ResetHandlerData[], const_boot_args[];
+extern "C" kern_return_t processor_start (processor_t);
+extern "C" kern_return_t kernel_thread_start (void (*) (void *, wait_result_t), void *, thread_t *);
+extern "C" void thread_deallocate (thread_t);
+extern "C" thread_t current_thread (void);
+extern "C" kern_return_t thread_terminate (thread_t);
+
+extern "C" {
+volatile uint32_t armcpu_registered = 0;
+volatile uint32_t armcpu_gic_ready = 0;
+volatile uint64_t armcpu_timer_interrupts = 0;
+volatile uint64_t armcpu_ipi_interrupts = 0;
+volatile uint64_t armcpu_ipi_sent = 0;       // SGIs the kernel asked ArmCpu::signalCPU to send
+volatile uint64_t armcpu_ipi_selftest_sent = 0;
+// Boot core's own GIC registers read back once after enabling (own frame, the same one just written): 0 IGROUPR0, 1 ISENABLER0, 2 GICD_CTLR,
+// 3 GICD_TYPER, 4 IGRPMODR0, 5 ICC_PMR_EL1, 6 ICC_IGRPEN1_EL1, 7 ICC_SRE_EL1.
+volatile uint32_t armcpu_gic_boot[8];
+// Probe decision and GIC bring-up evidence. BootProgress links weak, zero-filled
+// 4 KB placeholders for the armcpu_probe_* names (BootProgressStubs.c), so a panel
+// reading "pr=0 acc=0" said nothing at all about whether probe() ran: the stub was
+// the symbol it resolved to. These strong definitions win over the weak stubs.
+//   calls/accepted   probe() entries / candidates returned to IOKit
+//   declined_type    provider lacked device_type="cpu" or a usable reg
+//   declined_number  another logical CPU (secondary startup is opt-in, sheng-smp=1)
+//   last_number      ml_get_cpu_number(reg) of the last candidate
+volatile uint32_t armcpu_probe_calls = 0, armcpu_probe_accepted = 0;
+volatile uint32_t armcpu_probe_declined_type = 0, armcpu_probe_declined_number = 0;
+volatile int32_t armcpu_probe_last_number = -1;
+// Where prepareGic() stopped, printed as "gic=<ready>.<stage>". 0 start() never
+// reached the GIC (or armcpu-skip-gic=1), 1 entered, 0x2x mapGic() reason
+// (1 no /arm-io, 2 no GIC node, 3 ranges/reg/compatible unusable, 4 region too
+// small, 5 translation refused, 6 map failed, 7 not a GICv3), 3 mapped,
+// 4 initDistributor failed, 5 wakeRedistributor failed, 6 ready.
+volatile uint32_t armcpu_gic_stage = 0;
+// How far ArmCpu::start() got before the machine stopped (boot-irq3 panel said
+// "stage: start ArmCpu" with gic=0.0: start() was entered and never reached
+// prepareGic(), whose first statement is armcpu_gic_stage = 1). Printed as
+// "cs=" and mirrored as a bit pattern at the bottom of the scanout buffer, so a
+// hang that wipes the text rows still says which step it died on.
+//   1 entered, 2 boot args parsed, 3 reg read, 4 cpu number resolved,
+//   5 secondary decided, 6 about to map the GIC, 7 GIC mapped, 8 IOCPU::start
+//   ok, 9 cpuName made, 10 about to call ml_processor_register (so a hang that
+//   reads 10 and never 11 is inside that call), 11 register returned, 12 args
+//   parsed, 13 controller allocated and initialised, 14 controller published,
+//   15 enableCPUInterrupt done, 16 IRQ action registered, 17 initCPU returned,
+//   18 registerService returned
+//   0xE1 no usable reg, 0xE2 logical id out of range, 0xE3 prepareGic failed,
+//   0xE4 IOCPU::start failed, 0xE5 cpuName failed, 0xE6 processor register failed
+volatile uint32_t armcpu_start_step = 0;
+// Last "about to run X" marker inside initCPU() (see r11SubStep). Kept next to
+// the start step because the panel's cs= cannot show it: initCPU runs after the
+// last stage repaint, so the screen text is the only live witness.
+volatile uint32_t armcpu_sub_step = 0;
+volatile int32_t armcpu_start_logical = -1;
+// GICR_WAKER of the boot core's frame: [0] as read before the wake-up, [1] as
+// read after it. ProcessorSleep is bit 0 and ChildrenAsleep bit 1; the older
+// code cleared bit 1 and polled bit 2, so ProcessorSleep stayed set and every
+// SGI_base write was ignored while prepareGic() still reported success.
+volatile uint32_t armcpu_gic_waker[2];
+// "Does this core's GIC deliver anything at all?" -- answered once at
+// initCPU() time with IRQs masked and the probe's own SGIs acked here, so the
+// kernel never sees them. A timer PPI that is configured but never delivered
+// and a CPU interface that delivers nothing look identical on the panel
+// otherwise (gic=ready, tirq=0).
+//   sgi1/sgi0   SGIs 0..15 that came back as Group 1 / Group 0
+//   pmr/igrpen1/sre/ctlr/rpr  ICC_* as read by the probe
+volatile uint32_t armcpu_selftest_el = 0;
+volatile uint32_t armcpu_selftest_sgi1 = 0, armcpu_selftest_sgi0 = 0;
+volatile uint32_t armcpu_selftest_pmr = 0, armcpu_selftest_igrpen1 = 0, armcpu_selftest_sre = 0;
+volatile uint32_t armcpu_selftest_ctlr = 0, armcpu_selftest_rpr = 0;
+// Live sample taken from the observation dump (0xdeadbeef = never sampled):
+// HPPIR1 shows the INTID the CPU interface is holding for this core even while
+// the CPU masks IRQs, so the INTID value tells forwarded-but-not-taken (27 before
+// irq16, 30 since) apart from 1023 = never forwarded.
+volatile uint32_t armcpu_live_hppir1 = 0xdeadbeef, armcpu_live_hppir0 = 0xdeadbeef;
+volatile uint32_t armcpu_live_pending = 0xdeadbeef, armcpu_live_active = 0xdeadbeef;
+volatile uint32_t armcpu_live_waker = 0xdeadbeef, armcpu_live_ctlr = 0xdeadbeef;
+volatile uint32_t armcpu_core_timer[8], armcpu_core_sgi[8];   // per logical core: architectural timer interrupts and SGI 0 taken
+static bool gSpiIpi = false;                // boot-arg armcpu-spi-ipi=1: IPIs are software-pended SPIs 1008+core routed to that core (ICC_SGI1R_EL1 generates nothing on this board)
+static bool gSelfIpi = false;               // boot-arg armcpu-self-ipi=1: every core sends itself SGI 0 from initCPU
+static bool gTimerCall = false;             // boot-arg armcpu-timer-call=1: the timer PPI also enters rtclock_intr()
+                                            // (PPI 27 under Apple numbering; SDM660 raises INTID 30 -- see gTimerIntid)
+// boot-arg armcpu-sgi-probe=1: run armcpu_sgi_selfprobe() from initCPU().
+// Default OFF as of boot-irq9. The photo of boot-irq7 read S=0x10 / T=0x24 and
+// the panel never moved again: r11SubStep(0x24) is written immediately before
+// armcpu_sgi_selfprobe(), so the boot died inside that call -- not in the GIC
+// setup before it (0x21/0x22/0x23 all returned) and not in the cleanup after it.
+// The probe is diagnostic only: it answers "does this core's GIC deliver an SGI
+// at all" and has no role in running the machine. It writes ICC_SGI1R_EL1 /
+// ICC_SGI0R_EL1 and polls ICC_HPPIR1/0_EL1, and on a core where those system
+// registers are not routed to a live GIC they either trap or spin; since it also
+// masks IRQs before doing so, a trap inside it parks the boot with no output.
+// Keeping it behind an argument preserves the measurement without paying for it
+// on every boot.
+static bool gSgiProbe = false;
+// boot-arg armcpu-init-diag=1: run the diagnostic tail of initCPU (0x22..0x27:
+// the two timer enables, the SGI self-probe, the GIC snapshot and the
+// redistributor cleanup). Off by default since boot-irq11.
+//
+// The tail is what stopped the boot, not the GIC setup. boot-irq7 died at
+// T=0x24 (the self-probe) and boot-irq10 died at T=0x26 (the snapshot): both
+// were diagnosed as "the GIC does not deliver", and both are the only two
+// places that read ICC_HPPIR0/1_EL1. The cleanup is redundant now that
+// kSgiPpiEnable only arms SGI 0, and the timer enables are not needed either:
+// XNU's own arm_init() -> fiq_context_init() -> _enable_virtual_timer() turns
+// CNTV_CTL on, and ml_set_decrementer() writes CNTV_TVAL. Nothing in the tail
+// is a prerequisite for the boot; it only ever produced the panel's deadbeef
+// GIC row.
+static bool gInitDiag = false;
+volatile uint32_t armcpu_irq_phase = 0,armcpu_irq_id = 1023;
+// INTIDs below 32 that reached interrupt() and matched neither SGI 0 nor the timer
+// PPI (Apple numbering 27; SDM660 raises 30 -- see gTimerIntid).
+// These used to panic(). That panic runs in interrupt context, and once the
+// redistributor really wakes up (boot-irq1) the self-probe may leave SGIs 1..15
+// pending -- the first IRQ enable then delivers one, the panic clears the screen
+// and blocks forever printing, and the device sits black without rebooting.
+// Now they are acknowledged, counted and named, so the panel survives to say
+// which ID arrived.
+volatile uint32_t armcpu_irq_stray = 0, armcpu_irq_stray_id = 0xffffffff;
+// GICR_ISPENDR0 as read right after the self-probe: the pendings that the probe
+// could not acknowledge. Non-zero here with the redistributor awake is exactly
+// the set that used to blow up on the first IRQ enable.
+volatile uint32_t armcpu_irq_pending_after_probe = 0xdeadbeef;
+// Rate fuse. If the timer PPI is re-asserted faster than any real tick, the
+// interrupt storms and the boot thread never runs again; after 4000 interrupts
+// in one second the PPI is masked at the redistributor and fz records it, so the
+// panel keeps refreshing instead of freezing silently.
+volatile uint32_t armcpu_irq_fuse = 0, armcpu_irq_burst_max = 0;
+static uint64_t gBurstStart = 0;
+static uint32_t gBurstCount = 0;
+volatile uint32_t armcpu_quiesce_calls = 0,armcpu_halt_calls = 0;
+// Secondary-CPU bring-up evidence (sheng-smp=1). Step values: 1 nub started, 2 registered, 3 start thread running,
+// 4 PSCI CPU_ON issued, 5 entered initCPU on the new core, 6 GIC redistributor ready, 7 running.
+volatile uint32_t armcpu_smp_requested = 0, armcpu_smp_running = 0, armcpu_smp_conduit = 0;
+volatile uint32_t armcpu_smp_step[8], armcpu_smp_mpidr[8], armcpu_smp_seen_mpidr[8], armcpu_smp_fail[8], armcpu_boot_mpidr = 0;
+// System registers seen on each secondary core at initCPU entry: CurrentEL, SCTLR_EL1, TCR_EL1, MAIR_EL1 (low words), MIDR_EL1.
+volatile uint32_t armcpu_smp_sys[8][5], armcpu_boot_sys[5];
+volatile int32_t armcpu_smp_psci_rc[8];
+}
+
+#define ARMCPU_SMP_SLOTS 8
+
+// Three independent copies of the same number, because the panel text alone is
+// not trustworthy: it only repaints when a stage is recorded, so a photo taken
+// after a hang inside start() shows the row exactly as it was when start() was
+// entered (cs=0 cl=-1 gic=0.0), which reads like "prepareGic never ran".
+//   1. the counter the panel prints as cs=
+//   2. a block along the bottom of the scanout, painted with no locks (survives
+//      a frozen panel, but one block is ~7 photo pixels, i.e. half a cell of
+//      perspective error -- good for "somewhere around step 9", not for which)
+//   3. the literal hex step, drawn as text next to the blocks, and a stage line,
+//      so the number can be read instead of measured.
+// All three live in the boot-progress package; weak so a build without the panel
+// still links, with the call sites checking for presence. Declared here because
+// r11StartStep is defined before the rest of the file's externs.
+extern "C" void boot_progress_step_blip (unsigned step) __attribute__((weak_import));
+extern "C" void boot_progress_step_text (unsigned step) __attribute__((weak_import));
+extern "C" void boot_progress_substep_text (unsigned step) __attribute__((weak_import));
+extern "C" void boot_progress_stage (const char *text) __attribute__((weak_import));
+// "About to run X" marker inside initCPU(). Written before the call, so the
+// number on screen names the call that never returned.
+// Default path (boot-irq11 on): 0x21 enableGic, 0x28 setCPUState, 0x29 the
+// first enableCPUTimeBase(true), 0x2A about to return to start().
+// armcpu-init-diag=1 adds the old observation tail between 0x21 and 0x28:
+// 0x22 enableCPUTimeBase(true), 0x23 enableCPUTimeBase(false), 0x24 the SGI
+// self-probe, 0x25 enableCPUTimeBase(true) again, 0x26 armcpu_gic_snapshot(),
+// 0x27 the redistributor cleanup. boot-irq7 stopped at 0x24 and boot-irq10 at
+// 0x26; both of those steps read ICC_HPPIR0/1_EL1, and neither ever returned.
+// Text only, no panel stage: a stage would take the panel lock and repaint,
+// which is itself a way to lose the evidence if an interrupt lands inside it.
+static void r11SubStep (unsigned step)
+{
+  armcpu_sub_step = step;
+  if (boot_progress_substep_text != nullptr) { boot_progress_substep_text (step); }
+}
+static void r11StartStep (unsigned step)
+{
+  armcpu_start_step = step;
+  if (boot_progress_step_blip != nullptr) { boot_progress_step_blip (step); }
+  if (boot_progress_step_text != nullptr) { boot_progress_step_text (step); }
+  if (boot_progress_stage != nullptr) {
+    // No snprintf in the kext: build "start step 0xNN" by hand.
+    char t[24];
+    unsigned i = 0;
+    const char *pre = "start step 0x";
+    while (*pre != 0 && i < 20) { t[i++] = *pre++; }
+    unsigned digits = 0;
+    for (int shift = 12; shift >= 0; shift -= 4) {
+      unsigned nibble = (step >> shift) & 0xFU;
+      if (nibble != 0) { digits = 1; }
+      if (digits != 0) { t[i++] = static_cast<char> (nibble < 10 ? ('0' + nibble) : ('a' + nibble - 10)); }
+    }
+    if (digits == 0) { t[i++] = '0'; }
+    t[i] = 0;
+    boot_progress_stage (t);
+  }
+}
+
+
+class ArmCpu : public IOCPU {
+  OSDeclareDefaultStructors (ArmCpu)
+  OSSharedPtr<IOMemoryMap> distributor;
+  OSSharedPtr<IOMemoryMap> redistributors;
+  IOCPUInterruptController *controller = nullptr;
+  const OSSymbol *cpuName = nullptr;
+  uintptr_t dist = 0;
+  uintptr_t redist = 0;
+  uint64_t affinity = 0;
+  uintptr_t redistBase = 0;
+  uint64_t redistSize = 0;
+  bool skipGic = false;
+  bool diagnosePower = false;
+  bool secondary = false;
+  uint32_t logicalId = 0;
+  bool mapGic (void);
+  bool initDistributor (void);
+  bool wakeRedistributor (bool local);
+  bool finishSecondary (void);
+  static void drainPending (void);
+  bool prepareGic (void);
+  void startSecondary (void);
+  static void startThread (void *argument, wait_result_t);
+  void enableGic (void);
+  void interrupt (void);
+  static void dispatch (void *target, void *, void *, int);
+public:
+  IOService *probe (IOService *provider, SInt32 *score) override;
+  bool start (IOService *provider) override;
+  void initCPU (bool boot) override;
+  void quiesceCPU (void) override;
+  void haltCPU (void) override;
+  kern_return_t startCPU (vm_offset_t, vm_offset_t) override;
+  void signalCPU (IOCPU *target) override;
+  uint64_t signalTarget (void) const { return affinity; }
+  void enableCPUTimeBase (bool enabled) override;
+  const OSSymbol *getCPUName (void) override;
+};
+
+OSDefineMetaClassAndStructors (ArmCpu, IOCPU)
+
+// Redistributor ISENABLER0: SGIs 0..15 (only SGI 0 is used by the kernel; the others let the self-SGI probe tell which INTIDs the GIC accepts) and the timer PPI.
+// SGI 0 is the only group-1 SGI the kernel sends (cpu_signal -> ICC_SGI1R_EL1
+// with INTID 0), and the timer PPI is gTimerIntid -- 30 on SDM660, 27 only under
+// Apple's numbering (boot-irq16 read pend=40200000 with isen holding bit 27). SGIs 1..15 have no
+// sender and no handler: enabling them only turns a stale pending bit into a
+// panic in interrupt context (that is the 2026-11-04 black screen after
+// boot-irq1). The redistributor is narrowed here instead of by a cleanup pass
+// later in initCPU, so the interrupt path never carries an armed source it will
+// disarm a few instructions later.
+// Which PPI number does CNTV_CTL actually raise on this SoC?
+// Apple's GIC maps the EL1 virtual timer to INTID 27. SDM660 does not:
+// soc/dts/sdm660.dtsi lists the four arch-timer PPIs as <1 13> <1 14> <1 11>
+// <1 10>, i.e. INTIDs 29/30/27/26, and in the arm,armv8-timer binding order the
+// second entry is the EL1 virtual timer -- INTID 30. boot-irq16's AUD row proved
+// it on hardware: pend=40200000 has bit 30 asserted (the timer was firing) while
+// isen carried bit 27 only, daif had I clear and the redistributor was awake. The
+// interrupt was pending the whole time, on an INTID nothing had enabled.
+// Override with armcpu-timer-intid=<16..31> on a board that numbers it differently.
+static uint32_t gTimerIntid = 30;
+
+static uint32_t sgiPpiEnable (void) { return 1U | (1U << gTimerIntid); }
+
+static const uint32_t kIpiSpiBase = 1008;   // INTIDs 1008..1015 stand for 'IPI to logical core 0..7'
+
+// boot-irq16: the same numbers the console audit prints, but stored so the panel
+// can repaint them every tick. The console has no scrollback: the audit runs
+// inside ArmCpu::start() and the kext logs that follow push it off the screen, so
+// boot-irq15's four R11 lines were never visible on a photograph. These globals
+// are the persistent copy; BootProgress.c draws them as one line.
+volatile uint32_t armcpu_audit_el = 0xffffffffU, armcpu_audit_dist_ctlr = 0, armcpu_audit_dist_typer = 0;
+volatile uint32_t armcpu_audit_isen = 0, armcpu_audit_pend = 0, armcpu_audit_act = 0;
+volatile uint32_t armcpu_audit_waker = 0, armcpu_audit_daif = 0;
+volatile uint64_t armcpu_audit_tirq = 0;
+volatile uint32_t armcpu_audit_tid = 0xffffffffU;   // PPI the timer handler accepts
+
+static uint32_t read32 (uintptr_t base, unsigned offset);   // defined below; the audit helpers use it
+
+// boot-irq14: interrupt-delivery audit. Every register that decides whether
+// PPI 27 can reach this core is read back and printed to the console. It
+// deliberately avoids ICC_HPPIR0/1_EL1 -- the two reads that stopped boot-irq7
+// (T=0x24) and boot-irq10 (T=0x26) -- and it never touches the panel, so the
+// numbers survive whatever happens next.
+static void r11GicAudit (const char *tag, uintptr_t dist, uintptr_t redist)
+{
+  uint64_t el, sre, pmr, igrp, ctlr, mp;
+  __asm__ volatile ("mrs %0, currentel" : "=r" (el));
+  __asm__ volatile ("mrs %0, icc_sre_el1" : "=r" (sre));
+  __asm__ volatile ("mrs %0, icc_pmr_el1" : "=r" (pmr));
+  __asm__ volatile ("mrs %0, icc_igrpen1_el1" : "=r" (igrp));
+  __asm__ volatile ("mrs %0, icc_ctlr_el1" : "=r" (ctlr));
+  __asm__ volatile ("mrs %0, mpidr_el1" : "=r" (mp));
+  printf ("R11 GIC[%s]: el=%llu mpidr=%llx sre=%llx pmr=%llx igrpen1=%llx icc_ctlr=%llx dist_ctlr=%x dist_typer=%x\n",
+          tag, (unsigned long long) (el >> 2), (unsigned long long) mp, (unsigned long long) sre,
+          (unsigned long long) pmr, (unsigned long long) igrp, (unsigned long long) ctlr,
+          read32 (dist, 0), read32 (dist, 4));
+  printf ("R11 GICR[%s]: waker=%x isen=%x pend=%x act=%x typer=%llx\n",
+          tag, read32 (redist, 0x14), read32 (redist + 0x10000, 0x100), read32 (redist + 0x10000, 0x200),
+          read32 (redist + 0x10000, 0x300), *reinterpret_cast<volatile uint64_t *> (redist + 8));
+  armcpu_audit_el = static_cast<uint32_t> (el >> 2);
+  armcpu_audit_dist_ctlr = read32 (dist, 0);
+  armcpu_audit_dist_typer = read32 (dist, 4);
+  armcpu_audit_waker = read32 (redist, 0x14);
+  armcpu_audit_isen = read32 (redist + 0x10000, 0x100);
+  armcpu_audit_pend = read32 (redist + 0x10000, 0x200);
+  armcpu_audit_act = read32 (redist + 0x10000, 0x300);
+}
+
+// Busy wait on the architectural counter: usable before any clock exists.
+static void r11WaitMs (unsigned ms)
+{
+  uint64_t start, now, frq;
+  __asm__ volatile ("isb; mrs %0, cntvct_el0; mrs %1, cntfrq_el0" : "=r" (start), "=r" (frq) :: "memory");
+  if (frq == 0) { frq = 19200000; }
+  do { __asm__ volatile ("isb; mrs %0, cntvct_el0" : "=r" (now) : : "memory"); }
+  while ((now - start) < (frq / 1000) * ms);
+}
+
+// Read-only "what does the interrupt path look like right now" for the console.
+static void r11IrqAudit (const char *tag, uintptr_t dist, uintptr_t redist)
+{
+  uint64_t ctl, cval, vct, frq, daif;
+  __asm__ volatile ("isb; mrs %0, cntv_ctl_el0; mrs %1, cntv_cval_el0; mrs %2, cntvct_el0; mrs %3, cntfrq_el0"
+                    : "=r" (ctl), "=r" (cval), "=r" (vct), "=r" (frq) :: "memory");
+  __asm__ volatile ("mrs %0, daif" : "=r" (daif));
+  // daif bit 7 (0x80) is I: 0 means the CPU would take the IRQ the moment the GIC
+  // asserts one. Printing it next to GICR_ISPENDR0 is what separates "masked" from
+  // "the CPU interface never delivered".
+  printf ("R11 TIMER[%s]: ctl=%llx cval=%llx vct=%llx frq=%llu daif=%llx timer_irqs=%llu stray=%llu last_id=%u\n",
+          tag, (unsigned long long) ctl, (unsigned long long) cval, (unsigned long long) vct,
+          (unsigned long long) frq, (unsigned long long) daif,
+          (unsigned long long) armcpu_timer_interrupts,
+          (unsigned long long) armcpu_irq_stray, armcpu_irq_id);
+  armcpu_audit_daif = static_cast<uint32_t> (daif);
+  armcpu_audit_tirq = armcpu_timer_interrupts;
+  r11GicAudit (tag, dist, redist);
+}
+
+static uint32_t read32 (uintptr_t base, unsigned offset)
+{
+  return *reinterpret_cast<volatile uint32_t *>(base + offset);
+}
+
+static void write32 (uintptr_t base, unsigned offset, uint32_t value)
+{
+  *reinterpret_cast<volatile uint32_t *>(base + offset) = value;
+}
+
+// Distributor side of the software IPI of logical core `core`: group 1, edge-triggered, priority 0x80, routed to affinity `aff`, enabled.
+static void spiIpiConfigure (uintptr_t dist, uint32_t core, uint64_t aff)
+{
+  const uint32_t id = kIpiSpiBase + core;
+  write32 (dist, 0x80 + (id / 32) * 4, read32 (dist, 0x80 + (id / 32) * 4) | (1U << (id % 32)));
+  write32 (dist, 0xc00 + (id / 16) * 4, read32 (dist, 0xc00 + (id / 16) * 4) | (2U << ((id % 16) * 2)));
+  write32 (dist, 0x400 + (id / 4) * 4, 0x80808080);
+  *reinterpret_cast<volatile uint64_t *>(dist + 0x6000 + 8ULL * id) = aff & 0xff00ffffffULL;
+  __asm__ volatile ("dsb sy" ::: "memory");
+  write32 (dist, 0x100 + (id / 32) * 4, 1U << (id % 32));
+  __asm__ volatile ("dsb sy" ::: "memory");
+}
+
+static void spiIpiSend (uintptr_t dist, uint32_t core)
+{
+  const uint32_t id = kIpiSpiBase + core;
+  __asm__ volatile ("dsb ishst" ::: "memory");
+  write32 (dist, 0x200 + (id / 32) * 4, 1U << (id % 32));
+  __asm__ volatile ("dsb sy" ::: "memory");
+}
+
+static uint64_t counter (void)
+{
+  uint64_t value;
+  __asm__ volatile ("isb; mrs %0, cntvct_el0" : "=r" (value));
+  return value;
+}
+
+static bool waitClear (uintptr_t base, unsigned offset, uint32_t mask)
+{
+  uint64_t frequency;
+  __asm__ volatile ("mrs %0, cntfrq_el0" : "=r" (frequency));
+  uint64_t started = counter ();
+  while ((read32 (base, offset) & mask) != 0) {
+    if (counter () - started > frequency / 10) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// GIC state shared by all CPU nubs. The boot CPU maps the distributor and redistributor frames; a secondary core
+// only needs the virtual addresses and its own redistributor frame.
+static OSSharedPtr<IOMemoryMap> gDistMap, gRedistMap;
+static uintptr_t gDist = 0, gFrames = 0;
+static uint64_t gFramesSize = 0;
+static uintptr_t gBootRedist = 0;      // boot core's own redistributor frame, captured by enableGic()
+extern "C" void armcpu_sgi_selfprobe (uint64_t *out);
+extern "C" void armcpu_gic_snapshot (void);
+// Provided by the boot-progress package (BootProgress.c). Weak so a build
+// without the panel still links; the call site checks it is present.
+extern "C" void boot_progress_irq_blip (unsigned irq, unsigned seq) __attribute__((weak_import));
+static IOCPUInterruptController *gController = nullptr;
+static volatile uint32_t gGicShared = 0;
+static uint64_t gRedistStride = 0; // DT redistributor-stride; 0 = infer from GICR_TYPER.VLPIS
+volatile uint32_t armcpu_gic_stride = 0, armcpu_gic_typer_probe[2];
+static bool gSmpWanted = false;
+// Secondary nubs never wait for the boot CPU (IOSleep needs the timer that only the boot nub enables): they queue here and
+// the boot nub, or a late secondary once the boot CPU is registered, finishes them.
+static class ArmCpu *volatile gPending[ARMCPU_SMP_SLOTS];
+static volatile uint32_t gBootRegistered = 0;
+static bool gRemoteGic = false; // sheng-smp-gic=1: the boot CPU prepares a new core's redistributor before CPU_ON
+
+// Shared peripheral interrupts (GICv3 SPIs, INTID 32..1019). A driver attaches a handler for one INTID; the line is set to
+// Group 1 non-secure, priority 0xa0, the given trigger and routed to the boot CPU (GICD_IROUTER, affinity routing is on),
+// then enabled. The handler runs in the primary interrupt context, before the EOI, and must clear a level source.
+// An SPI without a handler is counted and disabled instead of being acknowledged forever.
+#define ARMCPU_SPI_SLOTS 16
+struct ArmCpuSpi {uint32_t id; void (*handler) (void *); void *context; volatile uint64_t count;};
+static ArmCpuSpi gSpi[ARMCPU_SPI_SLOTS];
+static volatile uint32_t gSpiUsed = 0;
+static uint64_t gBootAffinity = 0;
+extern "C" {
+volatile uint64_t armcpu_spi_unhandled = 0;
+volatile uint32_t armcpu_spi_unhandled_id = 0;
+}
+
+IOService *ArmCpu::probe (IOService *provider, SInt32 *score)
+{
+  armcpu_probe_calls++;
+  OSData *type = OSDynamicCast (OSData, provider->getProperty ("device_type"));
+  OSData *reg = OSDynamicCast (OSData, provider->getProperty ("reg"));
+  uint32_t id;
+  if ((type == nullptr) || (type->getLength () != 4) ||
+      (memcmp (type->getBytesNoCopy (), "cpu", 4) != 0) ||
+      (reg == nullptr) || (reg->getLength () < sizeof (id))) {
+    armcpu_probe_declined_type++;
+    return nullptr;
+  }
+  memcpy (&id, reg->getBytesNoCopy (), sizeof (id));
+  armcpu_probe_last_number = ml_get_cpu_number (id);
+  if (ml_get_cpu_number (id) != ml_get_boot_cpu_number ()) {
+    unsigned smp = 0;
+    PE_parse_boot_argn ("sheng-smp", &smp, sizeof (smp));
+    if (smp == 0 || ml_get_cpu_number (id) < 0 || ml_get_cpu_number (id) >= ARMCPU_SMP_SLOTS) {
+      armcpu_probe_declined_number++;
+      return nullptr; // Secondary startup is opt-in (sheng-smp=1).
+    }
+  }
+  armcpu_probe_accepted++;
+  return IOCPU::probe (provider, score);
+}
+
+// Does the entry carry `want` in its NUL-separated compatible list?
+static bool r11CompatibleHas (IORegistryEntry *entry, const char *want)
+{
+  OSData *compatible = OSDynamicCast (OSData, entry->getProperty ("compatible"));
+  if (compatible == nullptr) { return false; }
+  const char *chars = static_cast<const char *> (compatible->getBytesNoCopy ());
+  unsigned length = compatible->getLength ();
+  unsigned wanted = static_cast<unsigned> (strlen (want));
+  for (unsigned index = 0; index < length;) {
+    unsigned size = 0;
+    while ((index + size) < length && chars[index + size] != 0) { size++; }
+    if ((size == wanted) && (memcmp (chars + index, want, size) == 0)) { return true; }
+    index += size + 1;
+  }
+  return false;
+}
+
+// The GIC node is exported into the ADT by the board device tree, so its name under
+// /arm-io is whatever that tree asked for: "intc" on one board, "interrupt-controller"
+// on another. The compatible string is the authoritative binding, so look the node up
+// by name first and fall back to scanning /arm-io for "arm,gic-v3". Without the
+// fallback a board whose tree names the node anything else leaves prepareGic() with a
+// NULL node, ArmCpu::start() returns false, no CPU is registered and the machine timer
+// never fires - which reads on the panel exactly like a node that was never published.
+static IORegistryEntry *r11GicEntry (IORegistryEntry *soc)
+{
+  IORegistryEntry *gic = IORegistryEntry::fromPath ("/arm-io/intc", gIODTPlane);
+  if ((gic != nullptr) || (soc == nullptr)) { return gic; }
+  OSIterator *kids = soc->getChildIterator (gIODTPlane);
+  if (kids == nullptr) { return nullptr; }
+  IORegistryEntry *found = nullptr, *next;
+  while ((next = OSDynamicCast (IORegistryEntry, kids->getNextObject ())) != nullptr) {
+    if (r11CompatibleHas (next, "arm,gic-v3") && (next->getProperty ("reg") != nullptr)) {
+      next->retain ();
+      found = next;
+      break;
+    }
+  }
+  kids->release ();
+  return found;
+}
+
+bool ArmCpu::mapGic (void)
+{
+  IORegistryEntry *soc = IORegistryEntry::fromPath ("/arm-io", gIODTPlane);
+  IORegistryEntry *gic = r11GicEntry (soc);
+  if ((soc == nullptr) || (gic == nullptr)) {
+    armcpu_gic_stage = (soc == nullptr) ? 0x21 : 0x22;
+    if (soc != nullptr) { soc->release (); }
+    if (gic != nullptr) { gic->release (); }
+    return false;
+  }
+  OSData *ranges = OSDynamicCast (OSData, soc->getProperty ("ranges"));
+  OSData *reg = OSDynamicCast (OSData, gic->getProperty ("reg"));
+  OSData *compatible = OSDynamicCast (OSData, gic->getProperty ("compatible"));
+  uint64_t bus[3];
+  uint64_t regions[4];
+  bool valid = (ranges != nullptr) && (ranges->getLength () == sizeof (bus)) &&
+               (reg != nullptr) && (reg->getLength () == sizeof (regions)) &&
+               (compatible != nullptr) && (compatible->getLength () == 11) &&
+               (memcmp (compatible->getBytesNoCopy (), "arm,gic-v3", 11) == 0);
+  if (!valid) { armcpu_gic_stage = 0x23; }
+  if (valid) {
+    memcpy (bus, ranges->getBytesNoCopy (), sizeof (bus));
+    memcpy (regions, reg->getBytesNoCopy (), sizeof (regions));
+  }
+  OSData *strideProperty = OSDynamicCast (OSData, gic->getProperty ("redistributor-stride"));
+  if (strideProperty != nullptr && strideProperty->getLength () == sizeof (uint64_t)) {
+    memcpy (&gRedistStride, strideProperty->getBytesNoCopy (), sizeof (uint64_t));
+    if (gRedistStride != 0x20000 && gRedistStride != 0x30000 && gRedistStride != 0x40000) { gRedistStride = 0; }
+  }
+  armcpu_gic_stride = static_cast<uint32_t> (gRedistStride);
+  soc->release ();
+  gic->release ();
+  if (!valid || (regions[1] < 0x10000) || (regions[3] < 0x20000)) {
+    if (valid) { armcpu_gic_stage = 0x24; }
+    return false;
+  }
+  for (unsigned index = 0; index < 4; index += 2) {
+    if ((regions[index] < bus[0]) || (regions[index] - bus[0] > bus[2]) ||
+        (regions[index + 1] > bus[2] - (regions[index] - bus[0])) ||
+        (bus[1] + regions[index] - bus[0] < bus[1])) {
+      armcpu_gic_stage = 0x25;
+      return false;
+    }
+  }
+  OSSharedPtr<IOMemoryDescriptor> distMemory (IOMemoryDescriptor::withPhysicalAddress (
+      bus[1] + regions[0] - bus[0], regions[1], kIODirectionInOut), OSNoRetain);
+  OSSharedPtr<IOMemoryDescriptor> rdMemory (IOMemoryDescriptor::withPhysicalAddress (
+      bus[1] + regions[2] - bus[0], regions[3], kIODirectionInOut), OSNoRetain);
+  if (!distMemory || !rdMemory) {
+    armcpu_gic_stage = 0x26;
+    return false;
+  }
+  distributor = OSSharedPtr<IOMemoryMap> (distMemory->map (kIOMapAnywhere | kIOMapInhibitCache), OSNoRetain);
+  redistributors = OSSharedPtr<IOMemoryMap> (rdMemory->map (kIOMapAnywhere | kIOMapInhibitCache), OSNoRetain);
+  if (!distributor || !redistributors) {
+    armcpu_gic_stage = 0x26;
+    return false;
+  }
+  dist = static_cast<uintptr_t> (distributor->getVirtualAddress ());
+  if (((read32 (dist, 0xffe8) >> 4) & 15) != 3) {
+    armcpu_gic_stage = 0x27;
+    return false;
+  }
+  redistBase = static_cast<uintptr_t> (redistributors->getVirtualAddress ());
+  redistSize = regions[3];
+  gDistMap = distributor;
+  gRedistMap = redistributors;
+  gDist = dist;
+  gFrames = redistBase;
+  gFramesSize = redistSize;
+  return true;
+}
+
+bool ArmCpu::initDistributor (void)
+{
+  uint32_t ctl = read32 (dist, 0);
+  write32 (dist, 0, ctl & ~3U);
+  if (!waitClear (dist, 0, 1U << 31)) { return false; }
+  write32 (dist, 0, (ctl & ~3U) | 16U);
+  if (!waitClear (dist, 0, 1U << 31)) { return false; }
+  unsigned interrupts = ((read32 (dist, 4) & 31) + 1) * 32;
+  for (unsigned id = 32; id < interrupts && id < 1020; id += 32) {
+    write32 (dist, 0x180 + id / 8, 0xffffffff);
+  }
+  return true;
+}
+
+// Runs on the core whose redistributor is configured: the frame is selected by that core's own MPIDR affinity.
+bool ArmCpu::wakeRedistributor (bool local)
+{
+  uintptr_t frames = redistBase;
+  // local: this core finds its own frame from MPIDR. Remote: the boot CPU prepares a not-yet-started core's frame
+  // from the DT affinity, so the new core never needs GIC MMIO of its own.
+  if (local) { __asm__ volatile ("mrs %0, mpidr_el1" : "=r" (affinity)); }
+  uint32_t target = static_cast<uint32_t> ((affinity & 0xffffff) | ((affinity >> 8) & 0xff000000));
+  redist = 0;
+  for (uint64_t offset = 0; offset + 0x20000 <= redistSize;) {
+    armcpu_gic_typer_probe[0] = static_cast<uint32_t> (offset);
+    uint64_t typer = *reinterpret_cast<volatile uint64_t *> (frames + offset + 8);
+    armcpu_gic_typer_probe[1] = static_cast<uint32_t> (typer);
+    if (static_cast<uint32_t> (typer >> 32) == target) {
+      redist = frames + offset;
+      break;
+    }
+    if ((typer & 16) != 0) { break; }
+    offset += gRedistStride != 0 ? gRedistStride : ((typer & 2) != 0 ? 0x40000 : 0x20000);
+  }
+  if (redist == 0) { return false; }
+  // GICR_WAKER (offset 0x14): bit 0 ProcessorSleep, bit 1 ChildrenAsleep (RO).
+  // This used to clear bit 1 and poll bit 2, i.e. neither of the two real
+  // fields: ProcessorSleep stayed set, the frame stayed asleep, and per the
+  // GICv3 architecture every GICR_* SGI_base access is then read/write-ignored
+  // -- so PPI 27 was never actually enabled even though the writes "succeeded"
+  // and prepareGic() reported stage 6. That is the whole shape of the
+  // 2026-11-04 run: gic=1.6, reg=1, timer asserted (ctl=5, ISTATUS), IRQ=0.
+  armcpu_gic_waker[0] = read32 (redist, 0x14);
+  write32 (redist, 0x14, armcpu_gic_waker[0] & ~1U);
+  if (!waitClear (redist, 0x14, 2)) {
+    armcpu_gic_waker[1] = read32 (redist, 0x14);
+    return false;
+  }
+  armcpu_gic_waker[1] = read32 (redist, 0x14);
+  uintptr_t sgi = redist + 0x10000;
+  write32 (sgi, 0x180, 0xffffffff);
+  write32 (sgi, 0x80, 0xffffffff);
+  write32 (sgi, 0xd00, 0);
+  write32 (sgi, 0x280, 0xffffffff);
+  for (unsigned offset = 0x400; offset < 0x420; offset += 4) {
+    write32 (sgi, offset, 0x80808080);
+  }
+  if (!local) { write32 (sgi, 0x100, sgiPpiEnable ()); }
+  __asm__ volatile ("dsb sy" ::: "memory");
+  return waitClear (redist, 0, 8);
+}
+
+bool ArmCpu::prepareGic (void)
+{
+  armcpu_gic_stage = 1;
+  if (!mapGic ()) { return false; }        // mapGic() records 0x2x itself
+  armcpu_gic_stage = 3;                    // distributor + redistributors mapped
+  if (!initDistributor ()) { armcpu_gic_stage = 4; return false; }
+  if (!wakeRedistributor (true)) { armcpu_gic_stage = 5; return false; }
+  armcpu_gic_stage = 6;
+  gGicShared = 1;
+  return true;
+}
+
+void ArmCpu::enableGic (void)
+{
+  uint64_t value;
+  __asm__ volatile ("mrs %0, icc_sre_el1" : "=r" (value));
+  value |= 1;
+  __asm__ volatile ("msr icc_sre_el1, %0; isb" :: "r" (value) : "memory");
+  __asm__ volatile ("mrs %0, icc_sre_el1" : "=r" (value));
+  if ((value & 1) == 0) { panic ("ArmCpu: GICv3 system register interface unavailable"); }
+  __asm__ volatile ("mrs %0, icc_ctlr_el1" : "=r" (value));
+  value &= ~2ULL; // EOImode 0: EOIR also deactivates the interrupt.
+  __asm__ volatile ("msr icc_ctlr_el1, %0" :: "r" (value) : "memory");
+  value = 0xff;
+  __asm__ volatile ("msr icc_pmr_el1, %0" :: "r" (value) : "memory");
+  value = 0;
+  __asm__ volatile ("msr icc_bpr1_el1, %0" :: "r" (value) : "memory");
+  if (!secondary) { gBootAffinity = affinity & 0xff00ffffffULL; }
+  if (!secondary || !gRemoteGic) {
+    write32 (redist + 0x10000, 0x100, sgiPpiEnable ());
+    // Group enable at the Distributor. What the hardware actually reports here
+    // (boot-irq16 AUD row on this board): dtyp=7b04f3, so GICD_TYPER.SecurityExtn
+    // (bit 10) is 1 -- the GIC DOES implement the security extensions -- and
+    // dctl reads back 0x12. From a Non-secure access EnableGrp0 (bit 0) and
+    // EnableGrp1S (bit 2) are RAZ/WI, so 0x12 (EnableGrp1NS + ARE_NS) is the
+    // complete and correct value here and bit 0 can never read back.
+    // Writing 0x13 as well costs nothing: bit 0 is ignored on this board and is
+    // the EnableGrp1 bit on a single-security-state GIC, so the same line is right
+    // in both layouts.
+    write32 (dist, 0, read32 (dist, 0) | 0x13U);
+  }
+  value = 1;
+  __asm__ volatile ("msr icc_igrpen1_el1, %0; dsb sy; isb" :: "r" (value) : "memory");
+  if (!secondary) {
+    uint64_t pmr, ig, sre;
+    gBootRedist = redist;
+    __asm__ volatile ("mrs %0, icc_pmr_el1" : "=r" (pmr));
+    __asm__ volatile ("mrs %0, icc_igrpen1_el1" : "=r" (ig));
+    __asm__ volatile ("mrs %0, icc_sre_el1" : "=r" (sre));
+    armcpu_gic_boot[0] = read32 (redist + 0x10000, 0x80);
+    armcpu_gic_boot[1] = read32 (redist + 0x10000, 0x100);
+    armcpu_gic_boot[2] = read32 (dist, 0);
+    armcpu_gic_boot[3] = read32 (dist, 4);
+    armcpu_gic_boot[4] = read32 (redist + 0x10000, 0xd00);
+    armcpu_gic_boot[5] = static_cast<uint32_t> (pmr);
+    armcpu_gic_boot[6] = static_cast<uint32_t> (ig);
+    armcpu_gic_boot[7] = static_cast<uint32_t> (sre);
+  }
+  armcpu_gic_ready = 1;
+}
+
+
+bool ArmCpu::start (IOService *provider)
+{
+  r11StartStep (1);
+  unsigned skip = 0;
+  PE_parse_boot_argn ("armcpu-skip-gic", &skip, sizeof (skip));
+  skipGic = skip != 0;
+  unsigned selfIpi = 0;
+  PE_parse_boot_argn ("armcpu-self-ipi", &selfIpi, sizeof (selfIpi));
+  gSelfIpi = selfIpi == 1;
+  unsigned spiIpi = 0;
+  PE_parse_boot_argn ("armcpu-spi-ipi", &spiIpi, sizeof (spiIpi));
+  gSpiIpi = spiIpi == 1;
+  unsigned diagnostic = 0;
+  PE_parse_boot_argn("armcpu-diagnostics", &diagnostic, sizeof(diagnostic));
+  diagnosePower=diagnostic==1;
+  unsigned timerIntid = 0;
+  PE_parse_boot_argn ("armcpu-timer-intid", &timerIntid, sizeof (timerIntid));
+  if ((timerIntid >= 16) && (timerIntid < 32)) { gTimerIntid = timerIntid; }
+  armcpu_audit_tid = gTimerIntid;
+  // Default 0: the IRQ path acknowledges PPI 27 and re-arms CNTV_CVAL itself but
+  // does NOT enter rtclock_intr(). boot-irq1 and boot-irq2 both went black the
+  // moment the timer PPI started being delivered, and a black screen that does
+  // not reboot is what a hang inside the handler looks like (park in the panic
+  // renderer, or a spin on a lock the interrupted context already held), not a
+  // printed panic. This separates "the interrupt arrives" from "rtclock_intr()
+  // survives being called here". armcpu-timer-call=1 puts the call back.
+  unsigned timerCall = 0;
+  PE_parse_boot_argn ("armcpu-timer-call", &timerCall, sizeof (timerCall));
+  gTimerCall = timerCall == 1;
+  unsigned sgiProbe = 0;
+  PE_parse_boot_argn ("armcpu-sgi-probe", &sgiProbe, sizeof (sgiProbe));
+  gSgiProbe = sgiProbe == 1;
+  unsigned initDiag = 0;
+  PE_parse_boot_argn ("armcpu-init-diag", &initDiag, sizeof (initDiag));
+  gInitDiag = initDiag == 1;
+  r11StartStep (2);
+  uint32_t physical = 0;
+  OSData *reg = OSDynamicCast (OSData, provider->getProperty ("reg"));
+  if ((reg == nullptr) || (reg->getLength () < sizeof (physical))) {
+    r11StartStep (0xE1);   // a nub that probe() accepted but start() cannot parse
+    return false;
+  }
+  memcpy (&physical, reg->getBytesNoCopy (), sizeof (physical));
+  r11StartStep (3);
+  int32_t logical = ml_get_cpu_number (physical);
+  armcpu_start_logical = logical;
+  r11StartStep (4);
+  if ((logical < 0) || (logical >= ARMCPU_SMP_SLOTS)) {
+    // Out of range here would index armcpu_smp_step[] below and corrupt whatever
+    // follows it in __DATA; refuse instead of walking off the array.
+    r11StartStep (0xE2);
+    return false;
+  }
+  logicalId = static_cast<uint32_t> (logical);
+  secondary = logicalId != static_cast<uint32_t> (ml_get_boot_cpu_number ());
+  r11StartStep (5);
+  if (secondary) {
+    if (!IOCPU::start (provider)) { r11StartStep (0xE4); return false; }
+    armcpu_smp_step[logicalId] = 1;
+    affinity = physical;
+    armcpu_smp_mpidr[logicalId] = physical;
+    cpuName = OSSymbol::withCStringNoCopy ("ARM architectural secondary CPU");
+    if (cpuName == nullptr) { r11StartStep (0xE5); return false; }
+    retain ();
+    __atomic_store_n (&gPending[logicalId], this, __ATOMIC_RELEASE);
+    if (gBootRegistered != 0) { drainPending (); }
+    r11StartStep (0x40);
+    return true;
+  } else {
+    uint64_t bootMpidr;
+    __asm__ volatile ("mrs %0, mpidr_el1" : "=r" (bootMpidr));
+    armcpu_boot_mpidr = static_cast<uint32_t> (bootMpidr);
+    r11StartStep (6);
+    if (!skipGic && !prepareGic ()) { r11StartStep (0xE3); return false; }
+    r11StartStep (7);
+    if (!IOCPU::start (provider)) { r11StartStep (0xE4); return false; }
+    r11StartStep (8);
+  }
+  cpuName = OSSymbol::withCStringNoCopy ("ARM architectural boot CPU");
+  if (cpuName == nullptr) { r11StartStep (0xE5); return false; }
+  r11StartStep (9);
+  ml_processor_info_t info = {};
+  info.cpu_id = this;
+  info.phys_id = physical;
+  info.log_id = logicalId;
+  // Everything from here to step 11 runs inside ml_processor_register(), which
+  // takes pset_create_lock, calls pset_find()/pset_create() and prints kprintf
+  // lines from there. Any of those three can block with no timer to rescue it,
+  // so the step numbers below are deliberately fine-grained: a hang that reads
+  // "10" and never "11" is inside the register call, not after it.
+  info.cluster_id = static_cast<uint32_t> (ml_get_cluster_number (physical));
+  info.cluster_type = ml_get_boot_cluster_type ();
+  perfmon_interrupt_handler_func pmi = nullptr;
+  r11StartStep (10);
+  kern_return_t status = ml_processor_register (&info, &machProcessor, &ipi_handler, &pmi);
+  if (status != KERN_SUCCESS) { r11StartStep (0xE6); panic ("ArmCpu: CPU %u registration failed: %d", logicalId, status); }
+  r11StartStep (11);
+  setCPUNumber (info.log_id);
+  armcpu_registered = 1;
+  unsigned smp = 0;
+  PE_parse_boot_argn ("sheng-smp", &smp, sizeof (smp));
+  gSmpWanted = smp != 0;
+  unsigned remote = 0;
+  PE_parse_boot_argn ("sheng-smp-gic", &remote, sizeof (remote));
+  gRemoteGic = remote != 0;
+  armcpu_smp_requested = gSmpWanted ? 1 : 0;
+  unsigned cpuCount = static_cast<unsigned> (ml_get_max_cpu_number ()) + 1;
+  r11StartStep (12);
+  controller = new IOCPUInterruptController;
+  if ((controller == nullptr) || (controller->initCPUInterruptController (cpuCount, 1) != kIOReturnSuccess)) {
+    panic ("ArmCpu: CPU interrupt controller allocation failed");
+  }
+  r11StartStep (13);
+  controller->registerCPUInterruptController ();
+  r11StartStep (14);
+  controller->enableCPUInterrupt (this);
+  r11StartStep (15);
+  if (controller->registerInterrupt (provider, logicalId, this, &ArmCpu::dispatch, nullptr) != kIOReturnSuccess) {
+    panic ("ArmCpu: CPU IRQ action registration failed");
+  }
+  gController = controller;
+  r11StartStep (16);
+  initCPU (true);
+  r11StartStep (17);
+  registerService ();
+  r11StartStep (18);
+  __atomic_store_n (&gBootRegistered, 1U, __ATOMIC_RELEASE);
+  drainPending ();
+  return true;
+}
+
+void ArmCpu::drainPending (void)
+{
+  for (unsigned id = 1; id < ARMCPU_SMP_SLOTS; id++) {
+    ArmCpu *cpu = __atomic_exchange_n (&gPending[id], static_cast<ArmCpu *> (nullptr), __ATOMIC_ACQ_REL);
+    if (cpu != nullptr) { cpu->finishSecondary (); }
+  }
+}
+
+bool ArmCpu::finishSecondary (void)
+{
+  dist = gDist;
+  redistBase = gFrames;
+  redistSize = gFramesSize;
+  if (gRemoteGic && !wakeRedistributor (false)) { armcpu_smp_fail[logicalId] = 3; return false; }
+  ml_processor_info_t info = {};
+  info.cpu_id = this;
+  info.phys_id = static_cast<uint32_t> (affinity);
+  info.log_id = logicalId;
+  info.cluster_id = static_cast<uint32_t> (ml_get_cluster_number (static_cast<uint32_t> (affinity)));
+  info.cluster_type = ml_get_boot_cluster_type ();
+  perfmon_interrupt_handler_func pmi = nullptr;
+  kern_return_t status = ml_processor_register (&info, &machProcessor, &ipi_handler, &pmi);
+  if (status != KERN_SUCCESS) { armcpu_smp_fail[logicalId] = 4; return false; }
+  setCPUNumber (info.log_id);
+  armcpu_smp_step[logicalId] = 2;
+  setCPUState (kIOCPUStateUninitalized);
+  registerService ();
+  startSecondary ();
+  return true;
+}
+
+// PSCI conduit comes from the /psci node of the device tree ("smc" or "hvc"); no default is assumed.
+static bool psciConduit (bool *hvc)
+{
+  IORegistryEntry *psci = IORegistryEntry::fromPath ("/psci", gIODTPlane);
+  if (psci == nullptr) { return false; }
+  OSData *method = OSDynamicCast (OSData, psci->getProperty ("method"));
+  bool ok = false;
+  if (method != nullptr && method->getLength () == 4 && memcmp (method->getBytesNoCopy (), "smc", 4) == 0) {
+    *hvc = false; ok = true;
+  } else if (method != nullptr && method->getLength () == 4 && memcmp (method->getBytesNoCopy (), "hvc", 4) == 0) {
+    *hvc = true; ok = true;
+  }
+  psci->release ();
+  return ok;
+}
+
+static int64_t psciCall (bool hvc, uint64_t function, uint64_t a, uint64_t b, uint64_t c)
+{
+  register uint64_t x0 __asm__ ("x0") = function;
+  register uint64_t x1 __asm__ ("x1") = a;
+  register uint64_t x2 __asm__ ("x2") = b;
+  register uint64_t x3 __asm__ ("x3") = c;
+  if (hvc) {
+    __asm__ volatile ("hvc #0" : "+r" (x0) : "r" (x1), "r" (x2), "r" (x3) : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+  } else {
+    __asm__ volatile ("smc #0" : "+r" (x0) : "r" (x1), "r" (x2), "r" (x3) : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+  }
+  return static_cast<int64_t> (x0);
+}
+
+void ArmCpu::startThread (void *argument, wait_result_t)
+{
+  ArmCpu *self = static_cast<ArmCpu *> (argument);
+  armcpu_smp_step[self->logicalId] = 3;
+  // Blocks until the new core reaches the scheduler; a core that never arrives only stalls this helper thread.
+  processor_start (self->machProcessor);
+  thread_terminate (current_thread ());
+}
+
+void ArmCpu::startSecondary (void)
+{
+  thread_t thread;
+  if (kernel_thread_start (&ArmCpu::startThread, this, &thread) != KERN_SUCCESS) {
+    armcpu_smp_psci_rc[logicalId] = -1000;
+    return;
+  }
+  thread_deallocate (thread);
+}
+
+void ArmCpu::initCPU (bool boot)
+{
+  if (secondary) {
+    if (!boot) { panic ("ArmCpu: secondary resume is unsupported"); }
+    armcpu_smp_step[logicalId] = 5;
+    uint64_t mpidr;
+    __asm__ volatile ("mrs %0, mpidr_el1" : "=r" (mpidr));
+    armcpu_smp_seen_mpidr[logicalId] = static_cast<uint32_t> (mpidr);
+    // A failure is recorded and the core parked (rather than a panic that hides the other cores' state).
+    if ((mpidr & 0xffff) != (affinity & 0xffff)) { armcpu_smp_fail[logicalId] = 1; for (;;) { __asm__ volatile ("wfe"); } }
+    if (!gRemoteGic && !wakeRedistributor (true)) { armcpu_smp_fail[logicalId] = 2; for (;;) { __asm__ volatile ("wfe"); } }
+    armcpu_smp_step[logicalId] = 6;
+    enableGic ();
+    if (gSpiIpi) { spiIpiConfigure (gDist, logicalId, affinity); }
+    // The shared IOCPUInterruptController blocks registrations until every core is enabled, so the secondary cores
+    // install their handler directly. ml_install_interrupt_handler() records it in the calling core's cpu_data.
+    ml_install_interrupt_handler (this, static_cast<int> (logicalId), this, reinterpret_cast<IOInterruptHandler> (&ArmCpu::dispatch), nullptr);
+    enableCPUTimeBase (true);
+    setCPUState (kIOCPUStateRunning);
+    armcpu_smp_step[logicalId] = 7;
+    armcpu_smp_running = armcpu_smp_running + 1;
+    // XNU clears SIGPdisabled for a core the first time that core takes an IPI, and cpu_signal() silently skips a core until then; Apple's
+    // CPU driver provokes it with a self-IPI from initCPU (osfmk/kern/machine.c, processor_up).
+    if (gSelfIpi) { signalCPU (this); }
+    return;
+  }
+  if (!boot) { panic ("ArmCpu: secondary/resume CPU startup is unsupported"); }
+  r11SubStep (0x20);
+  if (skipGic) {
+    // Explicit A/B hardware diagnostic: do not touch GIC MMIO or enable an
+    // interrupt source. CPU registration still happens; the timer is left off.
+    setCPUState (kIOCPUStateRunning);
+    return;
+  }
+  // Park the virtual timer for the duration of the setup. XNU already turned it
+  // on in arm_init() (fiq_context_init -> _enable_virtual_timer writes
+  // CNTV_CTL.ENABLE) with whatever CVAL was left behind, so PPI 27 is asserted
+  // the moment enableGic() unmasks it -- inside the very next statement. The
+  // timer is armed again as the last thing initCPU does, when the IRQ action
+  // registered at start() step 16 is in place and a tick has somewhere to go.
+  enableCPUTimeBase (false);
+  r11SubStep (0x21);
+  enableGic ();
+  if (gSpiIpi) { spiIpiConfigure (gDist, logicalId, affinity); }
+  // Read back what enableGic() claims it configured, before the timer is armed.
+  if (!secondary) { r11GicAudit ("post-enable", dist, redist); }
+  // Diagnostic tail: off unless armcpu-init-diag=1. Everything below this line
+  // is observation, not setup (see gInitDiag).
+  if (gInitDiag) {
+  // The first moment PPI 27 can actually be delivered: ISENABLER0 got 1<<27 in
+  // enableGic() above, and CNTV_CVAL still holds whatever the last deadline
+  // was. If that value is already behind CNTVCT, CTL=1 asserts the timer in the
+  // same breath and the interrupt is taken right here. On the 2026-11-04 photo
+  // the panel had recorded step 0x10 and the GIC sample was still untouched, so
+  // everything between this line and armcpu_gic_snapshot() is suspect.
+  r11SubStep (0x22);
+  enableCPUTimeBase (true);
+  // One-shot answer to "does this core's GIC deliver anything?", recorded while
+  // the answer is still unambiguous (no device IRQs armed, no handler needed):
+  // armcpu_sgi_selfprobe() masks IRQs, sends SGI 0..15 to this core through
+  // ICC_SGI1R_EL1 and then ICC_SGI0R_EL1, and acknowledges/EOIs whatever comes
+  // back, so the kernel never sees the probe's interrupts.
+  //
+  // Off by default since boot-irq9 (see gSgiProbe). boot-irq7 stopped with
+  // T=0x24 -- the marker written one line before this call -- which is the
+  // narrowest this bring-up has ever been: the GIC enable, the first timer
+  // enable and the timer mask all returned, and the next thing that never
+  // returned is the probe. Nothing between 0x22 and 0x23 was ever observed to
+  // hang, so the timer path is not what bit here.
+  {
+    uint64_t el, sys[10];
+    __asm__ volatile ("mrs %0, currentel" : "=r" (el));
+    armcpu_selftest_el = static_cast<uint32_t> (el >> 2);
+    // Mask the timer at its source first: HPPIR1 reports the highest-priority
+    // pending INTID, and a still-asserting timer PPI (priority 0x80, same as
+    // the SGIs) would hide every SGI the probe sends and read as "no delivery".
+    r11SubStep (0x23);
+    enableCPUTimeBase (false);
+    for (unsigned i = 0; i < 10; i++) { sys[i] = 0xdeadbeefULL; }   // "probe did not run"
+    if (gSgiProbe) {
+      r11SubStep (0x24);
+      armcpu_sgi_selfprobe (sys);
+    }
+    // 0x25 is written whether or not the probe ran, so the number on screen
+    // keeps naming the call that is about to execute rather than shifting
+    // meaning with the argument. Skipped probe: T=0x25 means the next hang is
+    // the second timer enable, not the probe.
+    r11SubStep (0x25);
+    enableCPUTimeBase (true);
+    armcpu_selftest_sgi1 = static_cast<uint32_t> (sys[1]);
+    armcpu_selftest_sgi0 = static_cast<uint32_t> (sys[2]);
+    armcpu_selftest_pmr = static_cast<uint32_t> (sys[3]);
+    armcpu_selftest_igrpen1 = static_cast<uint32_t> (sys[4]);
+    armcpu_selftest_sre = static_cast<uint32_t> (sys[5]);
+    armcpu_selftest_ctlr = static_cast<uint32_t> (sys[6]);
+    armcpu_selftest_rpr = static_cast<uint32_t> (sys[7]);
+    r11SubStep (0x26);
+    armcpu_gic_snapshot ();
+  }
+  // The probe switched SGIs 0..15 on to ask "does anything come back at all".
+  // Until boot-irq1 the redistributor stayed asleep, so every SGI it could not
+  // acknowledge was discarded by the GIC. Now that it really wakes, such an SGI
+  // sits in GICR_ISPENDR0 and is delivered the instant IRQs are enabled -- and
+  // INTIDs 1..15 have neither a handler nor a use (the kernel only sends SGI 0).
+  // That is the shape of the 2026-11-04 black screen: first IRQ enable, stray
+  // SGI, panic in interrupt context, screen cleared, console blocked.
+  // Keep only what the kernel uses and record what the probe had left behind.
+  r11SubStep (0x27);
+  if (!secondary && (gBootRedist != 0)) {
+    const uintptr_t sgi = gBootRedist + 0x10000;
+    write32 (sgi, 0x180, 0xffffU);                          // ICENABLER0: SGI 0..15 off
+    write32 (sgi, 0x280, 0xffffU);                          // ICPENDR0: drop probe leftovers
+    armcpu_irq_pending_after_probe = read32 (sgi, 0x200);   // ISPENDR0 after clearing
+    write32 (sgi, 0x100, sgiPpiEnable ());                  // ISENABLER0: SGI 0 + the timer PPI
+    __asm__ volatile ("dsb sy" ::: "memory");
+  }
+  }   // if (gInitDiag)
+  r11SubStep (0x28);
+  setCPUState (kIOCPUStateRunning);
+  // The IRQ action is registered (start() step 16), so the first tick from here
+  // has a handler. rtclock_intr()'s argument is is_user_context, not a count:
+  // 0 means "not from user mode".
+  r11SubStep (0x29);
+  enableCPUTimeBase (true);
+  r11SubStep (0x2A);
+  if (!secondary) {
+    // Two 50 ms deadlines: either a tick arrives and the handler moves CNTV_CVAL,
+    // or the GIC holds PPI 27 pending and the audit below says so. Both outcomes
+    // name the next fix, and neither depends on the panel or on ICC_HPPIR*.
+    r11WaitMs (100);
+    r11IrqAudit ("after-arm", dist, redist);
+  }
+  if (gSelfIpi) { signalCPU (this); }
+}
+
+void ArmCpu::dispatch (void *target, void *, void *, int)
+{
+  static_cast<ArmCpu *> (target)->interrupt ();
+}
+
+void ArmCpu::interrupt (void)
+{
+  // Rate fuse (see armcpu_irq_fuse): measured in CNTFRQ windows, so it is
+  // independent of the timebase's ns-per-tick conversion being right yet.
+  {
+    uint64_t now, frq;
+    __asm__ volatile ("mrs %0, cntvct_el0; mrs %1, cntfrq_el0" : "=r" (now), "=r" (frq));
+    if (gBurstStart == 0) { gBurstStart = now; }
+    gBurstCount = gBurstCount + 1;
+    if (gBurstCount > armcpu_irq_burst_max) { armcpu_irq_burst_max = gBurstCount; }
+    if (now - gBurstStart >= frq) { gBurstStart = now; gBurstCount = 0; }
+    else if ((gBurstCount > 4000) && (armcpu_irq_fuse == 0)) {
+      armcpu_irq_fuse = 1;
+      if (gBootRedist != 0) { write32 (gBootRedist + 0x10000, 0x180, 1U << gTimerIntid); }
+    }
+  }
+  // A hang in this handler freezes the panel, and the screen then keeps whatever
+  // was last painted -- which is why boot-irq1 and boot-irq2 could only be
+  // described as "black". Mark the scanout buffer directly, from interrupt
+  // context, on the first arrival and every 16th after it, so a later photograph
+  // shows that IRQs arrived even if nothing else ever runs again.
+  {
+    static uint32_t blipSeq = 0;
+    blipSeq = blipSeq + 1;
+    if (((blipSeq & 15U) == 1U) && (&boot_progress_irq_blip != nullptr)) {
+      boot_progress_irq_blip (armcpu_irq_id, blipSeq);
+    }
+  }
+  unsigned drained=0, strikes=0;
+  for (;;) {
+    armcpu_irq_phase=1;
+    uint64_t id;
+    __asm__ volatile ("mrs %0, icc_iar1_el1" : "=r" (id));
+    armcpu_irq_id=static_cast<uint32_t>(id & 0xffffff);
+    if ((id & 0xffffff) >= 1020) { armcpu_irq_phase=0;break; }
+    if(diagnosePower && ++drained>128)panic("ArmCpu: IRQ drain exceeds 128 id=%llx timer=%llu IPI=%llu",id,armcpu_timer_interrupts,armcpu_ipi_interrupts);
+    // Drain fuse. A PPI 27 whose handler never moves CNTV_CVAL re-asserts while
+    // this loop is still inside the handler, so it is taken again immediately:
+    // the boot thread never runs again and the panel freezes. Real ticks drain
+    // once or twice, so 16 in one entry means the source is stuck. Mask it and
+    // record it rather than spinning forever (diagnosePower off means the
+    // 128-strike panic above never fires).
+    if ((strikes = strikes + 1) > 16 && armcpu_irq_fuse == 0) {
+      armcpu_irq_fuse = 1;
+      if (gBootRedist != 0) { write32 (gBootRedist + 0x10000, 0x180, 1U << gTimerIntid); }
+    }
+    if ((id & 0xffffff) == gTimerIntid) {
+      armcpu_timer_interrupts = armcpu_timer_interrupts + 1;
+      armcpu_core_timer[logicalId & 7] = armcpu_core_timer[logicalId & 7] + 1;
+      armcpu_irq_phase=2;
+      // Move the deadline before anything else can fail: PPI 27 is asserted
+      // while CNTV_CVAL is in the past, so a handler that does not reprogram it
+      // is taken again before this loop even unwinds. 10 ms is the early-boot
+      // tick; rtclock_intr() overwrites this with its own deadline when enabled.
+      {
+        uint64_t now, frq;
+        __asm__ volatile ("mrs %0, cntvct_el0; mrs %1, cntfrq_el0" : "=r" (now), "=r" (frq));
+        __asm__ volatile ("msr cntv_cval_el0, %0; isb" :: "r" (now + frq / 100ULL));
+      }
+      if (gTimerCall) { rtclock_intr (0); }
+      armcpu_irq_phase=3;
+    } else if ((id & 0xffffff) == 0) {
+      armcpu_ipi_interrupts = armcpu_ipi_interrupts + 1;
+      armcpu_core_sgi[logicalId & 7] = armcpu_core_sgi[logicalId & 7] + 1;
+      armcpu_irq_phase=4;
+      if (ipi_handler != nullptr) { ipi_handler (); }
+      armcpu_irq_phase=5;
+    } else if (gSpiIpi && (id & 0xffffff) >= kIpiSpiBase && (id & 0xffffff) < kIpiSpiBase + 8) {
+      armcpu_ipi_interrupts = armcpu_ipi_interrupts + 1;
+      armcpu_core_sgi[logicalId & 7] = armcpu_core_sgi[logicalId & 7] + 1;
+      armcpu_irq_phase = 4;
+      if (ipi_handler != nullptr) { ipi_handler (); }
+      armcpu_irq_phase = 5;
+    } else {
+      const uint32_t intid = static_cast<uint32_t> (id & 0xffffff);
+      ArmCpuSpi *spi = nullptr;
+      const uint32_t used = __atomic_load_n (&gSpiUsed, __ATOMIC_ACQUIRE);
+      for (uint32_t slot = 0; intid >= 32 && slot < used && spi == nullptr; slot++) {
+        if (gSpi[slot].id == intid) { spi = &gSpi[slot]; }
+      }
+      if (spi != nullptr) {
+        armcpu_irq_phase = 7;
+        spi->count = spi->count + 1;
+        spi->handler (spi->context);
+      } else if (intid >= 32 && gDist != 0) {
+        armcpu_spi_unhandled = armcpu_spi_unhandled + 1;
+        armcpu_spi_unhandled_id = intid;
+        write32 (gDist, 0x180 + (intid / 32) * 4, 1U << (intid % 32));
+      } else if (intid < 32) {
+        // An SGI/PPI with no handler. Used to panic() here, which is a panic in
+        // interrupt context: the screen is cleared and the console then blocks,
+        // leaving the device black and not rebooting. Count it instead.
+        armcpu_irq_stray = armcpu_irq_stray + 1;
+        armcpu_irq_stray_id = intid;
+      } else {
+        panic ("ArmCpu: unexpected architectural IRQ %llu", id);
+      }
+    }
+    armcpu_irq_phase=6;
+    __asm__ volatile ("msr icc_eoir1_el1, %0; isb" :: "r" (id) : "memory");
+  }
+}
+
+void ArmCpu::signalCPU (IOCPU *target)
+{
+  ArmCpu *peer = OSDynamicCast (ArmCpu, target);
+  if (peer == nullptr || (peer->signalTarget () & 0xff) >= 16) {
+    panic ("ArmCpu: unsupported CPU signal target");
+  }
+  uint64_t aff = peer->signalTarget ();
+  uint64_t sgi = ((aff & 0xff00000000ULL) << 16) | ((aff & 0xff0000) << 16) |
+                 ((aff & 0xff00) << 8) | (1ULL << (aff & 0xff));
+  armcpu_ipi_sent = armcpu_ipi_sent + 1;
+  if (gSpiIpi) { spiIpiSend (gDist, peer->logicalId & 7); return; }
+  __asm__ volatile ("dsb ishst; msr icc_sgi1r_el1, %0; isb" :: "r" (sgi) : "memory");
+}
+
+// Diagnostic: sends SGI 0 to the core whose MPIDR affinity is aff (the DT "reg" value, e.g. 0x100 for core 1) exactly as signalCPU
+// does. The handler on the target runs the kernel's IPI callback with nothing pending, which is harmless. Returns nothing: the caller
+// compares armcpu_ipi_interrupts before and after.
+// Read-only snapshot of the GIC state that decides whether SGI 0 reaches the core with MPIDR affinity aff: its redistributor's SGI frame and
+// the distributor control register. out: 0 IGROUPR0, 1 ISENABLER0, 2 ISPENDR0, 3 IGRPMODR0, 4 GICR_WAKER, 5 GICD_CTLR, 6 IPRIORITYR0, 7 found(1).
+// armcpu_gic_diag_stage names the access in progress, so a read that never returns is identified from another thread:
+// 0x100+frame walk, 2 IGROUPR0, 3 ISENABLER0, 4 ISPENDR0, 5 IGRPMODR0, 6 WAKER, 7 GICD_CTLR, 8 IPRIORITYR0, 9 done, 0xe not found.
+volatile uint32_t armcpu_gic_diag_stage = 0;
+extern "C" void armcpu_gic_diag (uint64_t aff, uint32_t *out)
+{
+  for (unsigned i = 0; i < 8; i++) { out[i] = 0xdeadbeef; }
+  if (gDist == 0 || gFrames == 0) { armcpu_gic_diag_stage = 0xe; return; }
+  const uint32_t target = static_cast<uint32_t> ((aff & 0xffffff) | ((aff >> 8) & 0xff000000));
+  for (uint64_t offset = 0; offset + 0x20000 <= gFramesSize;) {
+    armcpu_gic_diag_stage = 0x100 + static_cast<uint32_t> (offset >> 16);
+    const uint64_t typer = *reinterpret_cast<volatile uint64_t *> (gFrames + offset + 8);
+    if (static_cast<uint32_t> (typer >> 32) == target) {
+      const uintptr_t redist = gFrames + offset, sgi = redist + 0x10000;
+      armcpu_gic_diag_stage = 2; out[0] = read32 (sgi, 0x80);
+      armcpu_gic_diag_stage = 3; out[1] = read32 (sgi, 0x100);
+      armcpu_gic_diag_stage = 4; out[2] = read32 (sgi, 0x200);
+      armcpu_gic_diag_stage = 5; out[3] = read32 (sgi, 0xd00);
+      armcpu_gic_diag_stage = 6; out[4] = read32 (redist, 0x14);
+      armcpu_gic_diag_stage = 7; out[5] = read32 (gDist, 0);
+      armcpu_gic_diag_stage = 8; out[6] = read32 (sgi, 0x400);
+      out[7] = 1;
+      armcpu_gic_diag_stage = 9;
+      return;
+    }
+    if ((typer & 16) != 0) { break; }
+    offset += gRedistStride != 0 ? gRedistStride : ((typer & 2) != 0 ? 0x40000 : 0x20000);
+  }
+  armcpu_gic_diag_stage = 0xe;
+}
+
+// Does an SGI sent to the calling core itself become pending at its own CPU interface, and which INTIDs? Only system registers are used (no GIC
+// MMIO). With IRQs masked, SGIs 0..15 are sent one at a time to this core's own MPIDR affinity through ICC_SGI1R_EL1 (Group 1) and, when that
+// shows nothing, through ICC_SGI0R_EL1 (Group 0); ICC_HPPIR1_EL1 / ICC_HPPIR0_EL1 is polled and a pending SGI is acknowledged and ended here so the
+// kernel never sees it. out[8], out[9]: CNTVCT ticks of one ICC_SGI1R_EL1 write and of one ICC_PMR_EL1 read (a trapped write costs far more). out: 0 MPIDR, 1 INTIDs pending as Group 1, 2 INTIDs pending as Group 0, 3 ICC_PMR, 4 ICC_IGRPEN1, 5 ICC_SRE, 6 ICC_CTLR, 7 ICC_RPR.
+extern "C" void armcpu_sgi_selfprobe (uint64_t *out)
+{
+  uint64_t mpidr, daif, v;
+  __asm__ volatile ("mrs %0, mpidr_el1" : "=r" (mpidr));
+  __asm__ volatile ("mrs %0, daif; msr daifset, #2; isb" : "=r" (daif) :: "memory");
+  for (unsigned i = 0; i < 10; i++) { out[i] = 0; }
+  out[0] = mpidr;
+  __asm__ volatile ("mrs %0, icc_pmr_el1" : "=r" (v)); out[3] = v;
+  __asm__ volatile ("mrs %0, icc_igrpen1_el1" : "=r" (v)); out[4] = v;
+  __asm__ volatile ("mrs %0, icc_sre_el1" : "=r" (v)); out[5] = v;
+  __asm__ volatile ("mrs %0, icc_ctlr_el1" : "=r" (v)); out[6] = v;
+  __asm__ volatile ("mrs %0, icc_rpr_el1" : "=r" (v)); out[7] = v;
+  if ((mpidr & 0xff) < 16) {
+    const uint64_t base = ((mpidr & 0xff00000000ULL) << 16) | ((mpidr & 0xff0000) << 16) | ((mpidr & 0xff00) << 8) | (1ULL << (mpidr & 0xff));
+    for (uint64_t intid = 0; intid < 16; intid++) {
+      const uint64_t sgi = base | (intid << 24);
+      uint64_t h = 1023, ta, tb;
+      __asm__ volatile ("dsb ishst; isb; mrs %0, cntvct_el0; isb" : "=r" (ta) :: "memory");
+      __asm__ volatile ("msr icc_sgi1r_el1, %0; isb; mrs %1, cntvct_el0" : "=r" (tb) : "r" (sgi) : "memory");
+      if (intid == 0) { out[8] = tb - ta; }
+      for (unsigned polls = 0; polls < 400; polls++) {
+        __asm__ volatile ("mrs %0, icc_hppir1_el1" : "=r" (h));
+        if ((h & 0xffffff) == intid) { break; }
+        __asm__ volatile ("isb" ::: "memory");
+      }
+      if ((h & 0xffffff) == intid) {
+        out[1] |= 1ULL << intid;
+        __asm__ volatile ("mrs %0, icc_iar1_el1" : "=r" (v));
+        __asm__ volatile ("msr icc_eoir1_el1, %0; isb" :: "r" (v) : "memory");
+        continue;
+      }
+      __asm__ volatile ("dsb ishst; msr icc_sgi0r_el1, %0; isb" :: "r" (sgi) : "memory");
+      for (unsigned polls = 0; polls < 400; polls++) {
+        __asm__ volatile ("mrs %0, icc_hppir0_el1" : "=r" (h));
+        if ((h & 0xffffff) == intid) { break; }
+        __asm__ volatile ("isb" ::: "memory");
+      }
+      if ((h & 0xffffff) == intid) {
+        out[2] |= 1ULL << intid;
+        __asm__ volatile ("mrs %0, icc_iar0_el1" : "=r" (v));
+        __asm__ volatile ("msr icc_eoir0_el1, %0; isb" :: "r" (v) : "memory");
+      }
+    }
+  }
+  {
+    uint64_t ta, tb;
+    __asm__ volatile ("isb; mrs %0, cntvct_el0; isb; mrs %2, icc_pmr_el1; isb; mrs %1, cntvct_el0" : "=r" (ta), "=r" (tb), "=r" (v) :: "memory");
+    out[9] = tb - ta;
+  }
+  __asm__ volatile ("msr daif, %0; isb" :: "r" (daif) : "memory");
+}
+
+extern "C" void armcpu_ipi_selftest (uint64_t aff)
+{
+  uint64_t sgi = ((aff & 0xff00000000ULL) << 16) | ((aff & 0xff0000) << 16) | ((aff & 0xff00) << 8) | (1ULL << (aff & 0xff));
+  armcpu_ipi_selftest_sent = armcpu_ipi_selftest_sent + 1;
+  if (gSpiIpi) { spiIpiSend (gDist, static_cast<uint32_t> ((aff >> 8) & 7)); return; }
+  __asm__ volatile ("dsb ishst; msr icc_sgi1r_el1, %0; isb" :: "r" (sgi) : "memory");
+}
+
+// Read-only live sample of the registers that say where the interrupt path
+// stops, taken from whichever context reaches the observation dump. Cheap (two
+// sysreg reads, four MMIO reads) and safe with IRQs masked: HPPIR1 reports what
+// the CPU interface is holding for this core regardless of PSTATE.
+extern "C" void armcpu_gic_snapshot (void)
+{
+  uint64_t v;
+  if ((gDist == 0) || (gBootRedist == 0)) { return; }
+  __asm__ volatile ("mrs %0, icc_hppir1_el1" : "=r" (v));
+  armcpu_live_hppir1 = static_cast<uint32_t> (v & 0xffffff);
+  __asm__ volatile ("mrs %0, icc_hppir0_el1" : "=r" (v));
+  armcpu_live_hppir0 = static_cast<uint32_t> (v & 0xffffff);
+  armcpu_live_pending = read32 (gBootRedist + 0x10000, 0x200);   // GICR_ISPENDR0
+  armcpu_live_active = read32 (gBootRedist + 0x10000, 0x300);    // GICR_ISACTIVER0
+  armcpu_live_waker = read32 (gBootRedist, 0x14);                // GICR_WAKER
+  armcpu_live_ctlr = read32 (gDist, 0);                          // GICD_CTLR
+}
+
+void ArmCpu::enableCPUTimeBase (bool enabled)
+{
+  if (enabled) {
+    // Arm a deadline in the future BEFORE enabling. CNTV_CTL.ENABLE with a
+    // CNTV_CVAL that is already behind CNTVCT asserts the timer in the same
+    // cycle, so "enable" would immediately raise PPI 27 instead of waiting for
+    // the first real interrupt. That is not hypothetical: the 2026-11-04 panel
+    // read TIMER vct=7c046b279 cval=79c153c4e (cval ~2 s in the past, CTL.ISTATUS
+    // set), and the first enableCPUTimeBase(true) is the first moment PPI 27 can
+    // be delivered at all -- the boot died at that exact step.
+    // 50 ms is long enough to get past the rest of initCPU() and short enough
+    // that the first tick still lands early in the boot.
+    uint64_t now, frq;
+    __asm__ volatile ("isb; mrs %0, cntvct_el0; mrs %1, cntfrq_el0" : "=r" (now), "=r" (frq) :: "memory");
+    if (frq == 0) { frq = 19200000; }
+    __asm__ volatile ("msr cntv_cval_el0, %0; isb" :: "r" (now + frq / 20) : "memory");
+  }
+  uint64_t value = enabled ? 1 : 2;
+  __asm__ volatile ("msr cntv_ctl_el0, %0; isb" :: "r" (value) : "memory");
+}
+
+void ArmCpu::quiesceCPU (void)
+{
+  armcpu_quiesce_calls=armcpu_quiesce_calls+1;
+  if(diagnosePower)panic("ArmCpu: unsupported quiesce requested before timer/GIC disable caller=%p halt=%u timer=%llu phase=%u",__builtin_return_address(0),armcpu_halt_calls,armcpu_timer_interrupts,armcpu_irq_phase);
+  enableCPUTimeBase (false);
+  uint64_t value = 0;
+  __asm__ volatile ("msr icc_igrpen1_el1, %0; dsb sy; isb" :: "r" (value) : "memory");
+}
+
+void ArmCpu::haltCPU (void)
+{
+  armcpu_halt_calls=armcpu_halt_calls+1;
+  quiesceCPU ();
+  setCPUState (kIOCPUStateStopped);
+  __asm__ volatile ("msr daifset, #15" ::: "memory");
+  for (;;) { __asm__ volatile ("wfi"); }
+}
+
+// The new core runs with its MMU and caches off until start_cpu enables them, so it reads the reset vector, ResetHandlerData
+// and the boot arguments from memory. Write those lines back to the point of coherency first: on this SoC the boot CPU's
+// dirty cache lines are not guaranteed to be visible to a core with caches off (XNU only flushes the per-CPU data).
+static void cleanToMemory (const void *start, size_t length)
+{
+  uint64_t ctr;
+  __asm__ volatile ("mrs %0, ctr_el0" : "=r" (ctr));
+  uintptr_t line = static_cast<uintptr_t> (4) << ((ctr >> 16) & 15);
+  uintptr_t address = reinterpret_cast<uintptr_t> (start) & ~(line - 1), end = reinterpret_cast<uintptr_t> (start) + length;
+  for (; address < end; address += line) { __asm__ volatile ("dc civac, %0" :: "r" (address) : "memory"); }
+  __asm__ volatile ("dsb sy; isb" ::: "memory");
+}
+
+kern_return_t ArmCpu::startCPU (vm_offset_t, vm_offset_t)
+{
+  if (!secondary) { return KERN_NOT_SUPPORTED; }
+  bool hvc = false;
+  if (!psciConduit (&hvc)) { armcpu_smp_psci_rc[logicalId] = -1001; return KERN_NOT_SUPPORTED; }
+  armcpu_smp_conduit = hvc ? 2 : 1;
+  // PSCI 0.2 CPU_ON (SMC64 function id); the entry point is the kernel's physical reset vector page, whose reset
+  // code selects this core's cpu_data entry by MPIDR affinity. The context id is unused by that code.
+  uint64_t entry = static_cast<uint64_t> (ml_static_vtop (reinterpret_cast<vm_offset_t> (LowResetVectorBase)));
+  cleanToMemory (LowResetVectorBase, 0x10000);   // reset vector, start_cpu and the code up to the MMU enable
+  cleanToMemory (ResetHandlerData, 0x1000);
+  cleanToMemory (const_boot_args, 0x1000);
+  armcpu_smp_step[logicalId] = 4;
+  int64_t result = psciCall (hvc, 0xc4000003ULL, affinity & 0xff00ffffffULL, entry, 0);
+  armcpu_smp_psci_rc[logicalId] = static_cast<int32_t> (result);
+  return result == 0 ? KERN_SUCCESS : KERN_FAILURE;
+}
+
+const OSSymbol *ArmCpu::getCPUName (void)
+{
+  return cpuName;
+}
+
+// Readback after configuration: bit 0 group 1, bit 1 enabled, bit 2 edge, bits 8..15 priority; IROUTER separately.
+extern "C" IOReturn armcpu_spi_attach (uint32_t intid, bool edge, void (*handler) (void *), void *context,
+                                       uint32_t *readback, uint64_t *router)
+{
+  if (gDist == 0 || armcpu_gic_ready == 0 || handler == nullptr) { return kIOReturnNotReady; }
+  const unsigned interrupts = ((read32 (gDist, 4) & 31) + 1) * 32;
+  if (intid < 32 || intid >= 1020 || intid >= interrupts) { return kIOReturnBadArgument; }
+  const uint32_t used = __atomic_load_n (&gSpiUsed, __ATOMIC_ACQUIRE);
+  for (uint32_t slot = 0; slot < used; slot++) {
+    if (gSpi[slot].id == intid) { return kIOReturnExclusiveAccess; }
+  }
+  if (used >= ARMCPU_SPI_SLOTS) { return kIOReturnNoResources; }
+  const uint32_t word = (intid / 32) * 4, bit = 1U << (intid % 32);
+  write32 (gDist, 0x180 + word, bit); // ICENABLER while it is reconfigured
+  if (!waitClear (gDist, 0, 1U << 31)) { return kIOReturnTimeout; }
+  write32 (gDist, 0x80 + word, read32 (gDist, 0x80 + word) | bit); // IGROUPR: group 1 (RAZ/WI if secure owns it)
+  *reinterpret_cast<volatile uint8_t *> (gDist + 0x400 + intid) = 0xa0;
+  const unsigned cfg = 0xc00 + (intid / 16) * 4, shift = (intid % 16) * 2 + 1;
+  write32 (gDist, cfg, (read32 (gDist, cfg) & ~(1U << shift)) | ((edge ? 1U : 0U) << shift));
+  *reinterpret_cast<volatile uint64_t *> (gDist + 0x6000 + 8 * intid) = gBootAffinity;
+  gSpi[used] = {intid, handler, context, 0};
+  __atomic_store_n (&gSpiUsed, used + 1, __ATOMIC_RELEASE);
+  __asm__ volatile ("dsb sy" ::: "memory");
+  write32 (gDist, 0x100 + word, bit); // ISENABLER
+  if (readback != nullptr) {
+    *readback = ((read32 (gDist, 0x80 + word) & bit) ? 1U : 0U) | ((read32 (gDist, 0x100 + word) & bit) ? 2U : 0U) |
+                (((read32 (gDist, cfg) >> shift) & 1U) << 2) |
+                (static_cast<uint32_t> (*reinterpret_cast<volatile uint8_t *> (gDist + 0x400 + intid)) << 8);
+  }
+  if (router != nullptr) { *router = *reinterpret_cast<volatile uint64_t *> (gDist + 0x6000 + 8 * intid); }
+  return kIOReturnSuccess;
+}
+
+extern "C" uint64_t armcpu_spi_count (uint32_t intid)
+{
+  const uint32_t used = __atomic_load_n (&gSpiUsed, __ATOMIC_ACQUIRE);
+  for (uint32_t slot = 0; slot < used; slot++) {
+    if (gSpi[slot].id == intid) { return gSpi[slot].count; }
+  }
+  return 0;
+}

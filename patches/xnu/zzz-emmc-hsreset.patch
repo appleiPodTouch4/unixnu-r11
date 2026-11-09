@@ -1,0 +1,67 @@
+# R11: clear HS_TIMING before BUS_WIDTH, then read LBA1 with PIO.
+#
+# boot-irq65's photo: PIO-only stayed alive (no black -- SDMA was the black-screen
+# regression), but LBA1 still read 4546492045464920 ("EFI " twice, n=512) and EXT_CSD
+# came back as rev 0/sec 0, so init failed 6.  The card still has the bootloader's
+# HS400 timing while the host was switched to 1-bit default speed.
+#
+# irq55 only wrote EXT_CSD[183]=0 (BUS_WIDTH) and left HS400 timing on a 1-bit bus.
+# This patch does the correct order after CMD7/CMD13:
+#
+#   CMD6 EXT_CSD[185]=0 (HS_TIMING default), wait busy
+#   CMD6 EXT_CSD[183]=0 (BUS_WIDTH 1-bit),   wait busy
+#   then the existing PIO LBA1 / MBR / EXT_CSD reads
+#
+# The host is already HC1=0 (1-bit) and the SDMA probe is still absent, so this image
+# stays PIO-only.  Stage lines hs0 ok/failed and bw1 ok/failed name the command that
+# did not take; d1/s/n then say whether the card delivers EFI PART in default speed.
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 370ed59..4d662f9 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1457,6 +1457,45 @@ emmc_device_init(void)
+ 		BP_STAGE(line);
+ 	}
+ 
++	/*
++	 * boot-irq66: force the card out of HS400 before any data read.  irq65's
++	 * PIO-only path was stable (no black) but LBA1 still read "EFI EFI " and
++	 * EXT_CSD came back as rev 0/sec 0: the card kept the bootloader's HS400
++	 * timing while the host was switched to 1-bit default speed.  Clear
++	 * HS_TIMING first and BUS_WIDTH second -- the opposite order of irq55's
++	 * width-only switch, which left an invalid HS400-on-1-bit state.
++	 */
++	{
++		uint64_t busy;
++
++		error = emmc_cmd(6, 0x03b90000u, /* EXT_CSD[185] = 0, HS_TIMING default, R1b */
++		    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
++		if (!error) {
++			busy = timeout_ns(200ull * NSEC_PER_MSEC);
++			while (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_DAT0_LOW) {
++				if (!wait_deadline(busy)) {
++					break;
++				}
++			}
++			BP_STAGE("emmc: hs0 ok");
++		} else {
++			BP_STAGE("emmc: hs0 failed");
++		}
++		error = emmc_cmd(6, 0x03b70000u, /* EXT_CSD[183] = 0, 1-bit, R1b */
++		    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
++		if (!error) {
++			busy = timeout_ns(200ull * NSEC_PER_MSEC);
++			while (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_DAT0_LOW) {
++				if (!wait_deadline(busy)) {
++					break;
++				}
++			}
++			BP_STAGE("emmc: bw1 ok");
++		} else {
++			BP_STAGE("emmc: bw1 failed");
++		}
++	}
++
+ 	/*
+ 	 * boot-irq42: the card is selected and in Transfer state, so the identification
+ 	 * clock limit no longer applies. Raise it before the first data transfer: at the

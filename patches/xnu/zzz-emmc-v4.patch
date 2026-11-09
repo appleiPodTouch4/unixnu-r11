@@ -1,0 +1,335 @@
+# R11: drive the eMMC host as SDHCI 4.x (V4EN + 64-bit addressing), ported from E5.
+#
+# The UniXNU-e5 port (Enceka/UniXNU-e5) does exactly what this driver could not:
+# its NativeEmmc reads LBA0/LBA1, validates the GPT and publishes all 70 partitions
+# on an eMMC host of the same generation.  Its source documents the failure class
+# this port was stuck in:
+#
+#   * an SDHCI 4.x host has HC2 (0x3e) V4EN set, and then the 32-bit block count
+#     lives at 0x00 while the system address lives at 0x58/0x5c.  This driver wrote
+#     the v3 16-bit count at 0x06 and the v3 system address at 0x00, so the real
+#     count at 0x00 stayed zero: the controller reported a data phase that never
+#     moved a block and the buffer port returned its previous word, which is the
+#     "EFI EFI " (0x4546492045464920) every earlier image saw.
+#   * the DMA select in Host Control 1 must be SDMA (bits 4:3 = 00).  If the
+#     bootloader left ADMA2 selected, writing a data address into 0x58 makes the
+#     controller read the data buffer as an ADMA2 descriptor table.
+#   * the clock divider changes shape: v3 has an 8-bit field at 15:8, v4 has a
+#     10-bit field at 15:6.  The old "400 kHz" arithmetic was therefore wrong on a
+#     v4 host as well.
+#
+# The validated E5 path also never issues CMD6: it re-identifies in 1-bit default
+# speed and reads the whole GPT that way.  This patch does the same, so the GPT
+# scan uses the bus configuration that just delivered EXT_CSD.
+#
+# Changes:
+#   - program HC2 = V4EN|64BIT, read it back, and record hc1/hc2/hc2_boot/v4 for
+#     the panel;
+#   - Host Control 1 = 0 (1-bit, SDMA select);
+#   - emmc_clock_set_rate(kHz): v4 10-bit divider, v3 8-bit fallback;
+#   - block count at 0x00 (32-bit) on v4, system address at 0x58/0x5c;
+#   - emmc_sdma_read() selects SDMA and uses the same layout;
+#   - drop the CMD6 8-bit/HS switch (E5 keeps 1-bit default speed).
+diff --git a/bsd/dev/qcom_emmc.c b/bsd/dev/qcom_emmc.c
+index 6404163..11ad764 100644
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -121,6 +121,17 @@ volatile unsigned int qcom_emmc_bs, qcom_emmc_bc, qcom_emmc_dat, qcom_emmc_sdm;
+ volatile unsigned long long qcom_emmc_d2q;
+ volatile unsigned int qcom_emmc_r2, qcom_emmc_sdma_phys, qcom_emmc_sdma_ok,
+     qcom_emmc_dmaerr, qcom_emmc_st13;
++/*
++ * boot-irq57: the host-controller layout. E5's NativeEmmc (UniXNU-e5) proves the
++ * class of failure this driver hit: an SDHCI v4 host (HC2 V4EN=1) keeps the 32-bit
++ * block count at 0x00 and the system address at 0x58/0x5c, while this driver wrote
++ * the v3 count at 0x06 and the v3 system address at 0x00.  With V4EN=1 the count at
++ * 0x00 stays zero, the controller reports a transfer that never moved data, and the
++ * buffer port hands back its previous word -- exactly "EFI EFI ".  hc2_boot is the
++ * value the bootloader left, hc2 the value after this driver programmed it, hc1 the
++ * Host Control 1 (DMA select / bus width), v4 whether V4EN stuck.
++ */
++volatile unsigned int qcom_emmc_hc1, qcom_emmc_hc2, qcom_emmc_hc2_boot, qcom_emmc_v4;
+ /* The DMA landing zone. One block (512 = EMMC_BLOCK below), page aligned so the CPU
+  * physical address is guaranteed to cover 512 contiguous bytes of one page; the block
+  * is bounced through it because a caller's buffer has no such guarantee. */
+@@ -156,6 +167,12 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);
+ #define SDHCI_BUF_READ_EN      0x0800u
+ #define SDHCI_PRESENT_STATE    0x24
+ #define SDHCI_HOST_CONTROL     0x28
++/* boot-irq57: Host Control 2 exists only on SDHCI 4.x; V4EN switches the register
++ * layout (32-bit block count at 0x00, 64-bit system address at 0x58/0x5c). */
++#define SDHCI_HOST_CONTROL2    0x3e
++#define SDHCI_HC2_V4EN         0x1000u
++#define SDHCI_HC2_64BIT        0x2000u
++#define SDHCI_HC_DMA_MASK      0x18u
+ #define SDHCI_CLOCK_CONTROL    0x2c
+ #define SDHCI_TIMEOUT_CONTROL  0x2e
+ #define SDHCI_SOFTWARE_RESET   0x2f
+@@ -244,9 +261,13 @@ static struct {
+ 	uint32_t rca;
+ 	uint64_t first_block, nblocks;  /* partition, in 512-byte sectors */
+ 	uint32_t clock_div;             /* current SDCLK freq field */
++	uint32_t clock_khz;             /* last rate requested from emmc_clock_set_rate() */
+ 	/* boot-irq56: set once a DMA block read has completed. Every later read then goes
+ 	 * through the controller's engine instead of the buffer port. */
+ 	bool dma;
++	/* boot-irq57: the host is in SDHCI 4.x mode (HC2 V4EN stuck); block count lives
++	 * at 0x00 and the system address at 0x58/0x5c. */
++	bool v4;
+ 	int bmajor, cmajor;
+ 	dev_t bdev;
+ 	bool ready;
+@@ -392,12 +413,69 @@ emmc_clock_set(uint32_t div_field)
+ static uint32_t
+ emmc_clock_khz(void)
+ {
++	if (su.clock_khz) {
++		return su.clock_khz;
++	}
+ 	uint32_t base = su.base_mhz * 1000u;
+ 	uint32_t div = su.clock_div ? su.clock_div * 2u : 2u;
+ 
+ 	return div ? base / div : 0;
+ }
+ 
++/*
++ * boot-irq57: set a rate in kHz, in whichever divider layout the host uses.
++ *
++ * SDHCI 3.x has an 8-bit divider at bits 15:8, SDCLK = base / (2 * (field + 1)).
++ * SDHCI 4.x with V4EN has a 10-bit divider at bits 15:6, SDCLK = base / (2 * div).
++ * The old code always wrote the v3 field, so on a v4 host every "400 kHz" request
++ * was off by a factor of four (and the same mistake was present in the data-phase
++ * block count, which is what actually stopped the transfer).
++ */
++static void
++emmc_clock_set_rate(uint32_t khz)
++{
++	uint32_t base = su.base_mhz ? su.base_mhz * 1000u : 200000u;
++	uint64_t deadline = timeout_ns(100000ull * NSEC_PER_USEC);
++
++	if (!khz) {
++		khz = 400;
++	}
++	if (su.v4) {
++		uint32_t div = base / (2u * khz);
++		uint16_t v;
++
++		if (div < 1) {
++			div = 1;
++		}
++		if (div > 0x3ffu) {
++			div = 0x3ffu;
++		}
++		v = (uint16_t)((div << 6) | 0x1u);	/* internal clock on */
++		hc_wr16(SDHCI_CLOCK_CONTROL, v);
++		while (!(hc_rd16(SDHCI_CLOCK_CONTROL) & 0x0002u)) {
++			if (!wait_deadline(deadline)) {
++				BP_STAGE("emmc: clk unstable");
++				return;
++			}
++		}
++		hc_wr16(SDHCI_CLOCK_CONTROL, (uint16_t)(v | 0x4u));	/* SD clock on */
++		delay(2000);
++		su.clock_khz = div ? base / (2u * div) : 0;
++		su.clock_div = 0;
++	} else {
++		uint32_t field = base / (2u * khz);
++
++		if (field) {
++			field--;
++		}
++		if (field > 0xffu) {
++			field = 0xffu;
++		}
++		emmc_clock_set(field);
++		su.clock_khz = base / (2u * (field + 1u));
++	}
++}
++
+ static int
+ emmc_wait(uint32_t bits, int set, uint64_t deadline)
+ {
+@@ -496,11 +574,25 @@ emmc_sdma_read(unsigned idx, uint32_t arg, uint8_t *out)
+ 		}
+ 	}
+ 	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
+-	hc_wr(SDHCI_DMA_ADDRESS, phys);
+-	hc_wr(SDHCI_ADMA_ADDRESS, phys);
+-	hc_wr(SDHCI_ADMA_ADDRESS_HI, 0);
++	/*
++	 * boot-irq57: select SDMA (Host Control 1 bits 4:3 = 00) and use the layout
++	 * that goes with HC2 V4EN. The v4 count lives at 0x00; the system address
++	 * pair is 0x58/0x5c. Writing the v3 layout on this host left the count zero.
++	 */
++	hc_wr8(SDHCI_HOST_CONTROL,
++	    (uint8_t)(hc_rd8(SDHCI_HOST_CONTROL) & ~SDHCI_HC_DMA_MASK));
+ 	hc_wr16(SDHCI_BLOCK_SIZE, EMMC_BLOCK);
+-	hc_wr16(SDHCI_BLOCK_COUNT, 1);
++	if (su.v4) {
++		hc_wr(SDHCI_DMA_ADDRESS, 1);		/* 32-bit block count */
++		hc_wr(SDHCI_ADMA_ADDRESS, phys);	/* system address low */
++		hc_wr(SDHCI_ADMA_ADDRESS_HI, 0);
++	} else {
++		hc_wr(SDHCI_DMA_ADDRESS, phys);		/* v3 system address */
++		hc_wr16(SDHCI_BLOCK_COUNT, 1);
++	}
++	/* Capture what was written before the command can consume/decrement it. */
++	qcom_emmc_bs = hc_rd16(SDHCI_BLOCK_SIZE);
++	qcom_emmc_bc = su.v4 ? hc_rd(SDHCI_DMA_ADDRESS) : hc_rd16(SDHCI_BLOCK_COUNT);
+ 	hc_wr16(SDHCI_TRANSFER_MODE, SDHCI_TM_DMA_EN | SDHCI_TM_READ |
+ 	    SDHCI_TM_BLKCNT_EN);
+ 	hc_wr(SDHCI_ARGUMENT, arg);
+@@ -565,9 +657,19 @@ emmc_cmd(unsigned idx, uint32_t arg, uint16_t flags, uint32_t *resp,
+ 			return error;
+ 		}
+ 		hc_wr16(SDHCI_BLOCK_SIZE, EMMC_BLOCK);
+-		hc_wr16(SDHCI_BLOCK_COUNT, (uint16_t)blocks);
++		/*
++		 * boot-irq57: on an SDHCI 4.x host the block count is the 32-bit
++		 * register at 0x00; 0x06 is the v3 count and is ignored there. This
++		 * single difference is what left the real count at zero and made the
++		 * controller complete a transfer that never moved the block.
++		 */
++		if (su.v4) {
++			hc_wr(SDHCI_DMA_ADDRESS, blocks);
++		} else {
++			hc_wr16(SDHCI_BLOCK_COUNT, (uint16_t)blocks);
++		}
+ 		qcom_emmc_bs = hc_rd16(SDHCI_BLOCK_SIZE);
+-		qcom_emmc_bc = hc_rd16(SDHCI_BLOCK_COUNT);
++		qcom_emmc_bc = su.v4 ? hc_rd(SDHCI_DMA_ADDRESS) : hc_rd16(SDHCI_BLOCK_COUNT);
+ 		hc_wr16(SDHCI_TRANSFER_MODE,
+ 		    (uint16_t)(SDHCI_TM_READ | SDHCI_TM_BLKCNT_EN |
+ 		    (blocks > 1 ? SDHCI_TM_MULTI | SDHCI_TM_AUTO_CMD12 : 0)));
+@@ -798,6 +900,9 @@ emmc_device_init(void)
+ 	uint64_t deadline = timeout_ns(2ull * NSEC_PER_SEC);
+ 	int error;
+ 
++	/* boot-irq57: the bootloader's Host Control 2, before the software reset. */
++	qcom_emmc_hc2_boot = hc_rd16(SDHCI_HOST_CONTROL2);
++
+ 	/* Software reset, then report the hardware identity. */
+ 	/*
+ 	 * SWRST_ALL is self-clearing. On this unit it stays asserted for the full
+@@ -817,6 +922,35 @@ emmc_device_init(void)
+ 			}
+ 		}
+ 	}
++	/*
++	 * boot-irq57: drive the host as SDHCI 4.x and use the layout that goes with
++	 * it. E5's NativeEmmc (UniXNU-e5, scripts/emmc/NativeEmmc.cpp) reads the
++	 * whole GPT on a v4 host and its header documents the exact failure this
++	 * driver was hitting: with V4EN set, the 32-bit block count lives at 0x00
++	 * and the system address at 0x58/0x5c; writing the v3 count at 0x06 leaves
++	 * the real count zero and the controller reports a transfer that moved no
++	 * data, so the buffer port returns its previous word ("EFI EFI ").
++	 * Program V4EN + 64-bit addressing, read it back, and let su.v4 decide the
++	 * block-count/system-address registers everywhere else.
++	 */
++	hc_wr16(SDHCI_HOST_CONTROL2, SDHCI_HC2_V4EN | SDHCI_HC2_64BIT);
++	{
++		uint16_t hc2 = hc_rd16(SDHCI_HOST_CONTROL2);
++
++		su.v4 = (hc2 & SDHCI_HC2_V4EN) != 0;
++		qcom_emmc_hc2 = hc2;
++		qcom_emmc_v4 = su.v4 ? 1u : 0u;
++	}
++	/*
++	 * Host Control 1 = 0: 1-bit bus and DMA select bits 4:3 = 00 (SDMA). The
++	 * bootloader may have left ADMA2 selected; writing the system address while
++	 * ADMA2 is selected makes the controller read the data buffer as a
++	 * descriptor table, which is another way to get no data at all.
++	 */
++	hc_wr8(SDHCI_HOST_CONTROL, 0);
++	qcom_emmc_hc1 = hc_rd8(SDHCI_HOST_CONTROL);
++	BP_STAGE(su.v4 ? "emmc: hc2 v4" : "emmc: hc2 v3");
++
+ 	/*
+ 	 * boot-irq23 got past the SD clock and still timed out on CMD1 with h=0, i.e.
+ 	 * no command-complete bit and no error bit either. The cause is here: the
+@@ -868,9 +1002,9 @@ emmc_device_init(void)
+ 	    hc_rd16(SDHCI_HOST_VERSION), hc_rd(SDHCI_CAPABILITIES),
+ 	    hc_rd(SDHCI_CAPABILITIES + 4), hc_rd(CORE_PWRCTL_STATUS));
+ 
+-	/* 400 kHz identification clock. */
+-	emmc_clock_set(su.base_mhz ? su.base_mhz * 1000u / 800u : 124u);
+-	/* (field units: SDCLK = base / (2 * (field + 1)); 124 -> ~400 kHz at 100 MHz) */
++	/* 400 kHz identification clock, in the divider layout su.v4 selected above. */
++	emmc_clock_set_rate(400);
++	BP_STAGE("emmc: clk 400k id");
+ 
+ 	/* Power: 1.8 V signalling, bus on. QCom v5 may ignore this. */
+ 	hc_wr8(SDHCI_HOST_CONTROL + 1, 0x0bu);
+@@ -1139,7 +1273,12 @@ emmc_device_init(void)
+ 	 *                              data phase is the remaining suspect (CMD13 after
+ 	 *                              the reads reports whether it is still in Transfer).
+ 	 */
+-	emmc_clock_set(su.base_mhz ? su.base_mhz * 1000u / 800u : 124u);
++	/*
++	 * boot-irq57: same 400 kHz as irq56 asked for, but through the divider layout
++	 * this host actually uses (emmc_clock_set_rate -> v4 10-bit field when
++	 * HC2 V4EN stuck).
++	 */
++	emmc_clock_set_rate(400);
+ 	BP_STAGE("emmc: clk 400khz");
+ 
+ 	/*
+@@ -1262,49 +1401,16 @@ emmc_device_init(void)
+ 		return error;
+ 	}
+ 	/*
+-	 * boot-irq39: switch the bus only after EXT_CSD has been read. boot-irq38 reached
+-	 * CMD7 (status 0x00000900, CURRENT_STATE = 4 = Transfer) and then timed out on
+-	 * CMD8, the 512-byte EXT_CSD read -- but it had already switched the card to
+-	 * 8-bit before that read. Reading EXT_CSD in 1-bit and changing the width
+-	 * afterwards is the order the kernel's own mmc core uses, and it keeps the first
+-	 * data transfer on the bus configuration that has already been proven.
++	 * boot-irq57: no CMD6, and no bus-width/timing switch.
++	 *
++	 * E5's NativeEmmc keeps the card on the 1-bit default-speed bus it
++	 * re-identified on and reads the whole GPT that way; its validated path never
++	 * issues CMD6. This driver's 8-bit/HS pair was also the one variable that made
++	 * irq55 worse, and the LBA-1 reads above happen before it anyway. Stay on the
++	 * bus configuration that just delivered EXT_CSD, so the GPT scan uses the same
++	 * layout and width that proved itself.
+ 	 */
+-	/* Now in Transfer state: 8-bit bus, then high speed. Both best effort. */
+-	error = emmc_cmd(6, 0x03b70200u, /* EXT_CSD[183] = 2 (8-bit), R1b */
+-	    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
+-	if (!error) {
+-		uint64_t busy = timeout_ns(200ull * NSEC_PER_MSEC);
+-		while (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_DAT0_LOW) {
+-			if (!wait_deadline(busy)) {
+-				break;
+-			}
+-		}
+-		uint8_t hc = hc_rd8(SDHCI_HOST_CONTROL);
+-		hc_wr8(SDHCI_HOST_CONTROL, (uint8_t)(hc | SDHCI_HC_WIDTH_8));
+-		BP_STAGE("emmc: bus8 ok");
+-	} else {
+-		BP_STAGE("emmc: bus8 failed");
+-		printf("R11 eMMC: bus width switch failed %d\n", error);
+-	}
+-	error = emmc_cmd(6, 0x03b90100u, /* EXT_CSD[185] = 1 (HS timing), R1b */
+-	    SDHCI_CMD_RESP_R48B | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
+-	if (!error) {
+-		uint64_t busy = timeout_ns(200ull * NSEC_PER_MSEC);
+-		while (hc_rd(SDHCI_PRESENT_STATE) & SDHCI_DAT0_LOW) {
+-			if (!wait_deadline(busy)) {
+-				break;
+-			}
+-		}
+-		uint8_t hc = hc_rd8(SDHCI_HOST_CONTROL);
+-		hc_wr8(SDHCI_HOST_CONTROL, (uint8_t)(hc | SDHCI_HC_HS));
+-		/* High speed: base/2, capped at 52 MHz via the field. */
+-		uint32_t field = su.base_mhz ? (su.base_mhz * 1000u / 2u) / 52000u : 0u;
+-		emmc_clock_set(MIN(field, 0xffu));
+-		BP_STAGE("emmc: hs ok");
+-		printf("R11 eMMC: high speed, clk ~%u kHz\n", emmc_clock_khz());
+-	} else {
+-		printf("R11 eMMC: high speed switch failed %d\n", error);
+-	}
++	BP_STAGE("emmc: 1bit ds");
+ 	uint32_t sec_count = (uint32_t)ext_csd[212] | (uint32_t)ext_csd[213] << 8 |
+ 	    (uint32_t)ext_csd[214] << 16 | (uint32_t)ext_csd[215] << 24;
+ 	printf("R11 eMMC: ext_csd rev %u sec_count %u (%u MiB)\n",
