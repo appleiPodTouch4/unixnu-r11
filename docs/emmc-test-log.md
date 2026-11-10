@@ -1,8 +1,9 @@
-# R11 eMMC 测试结果（irq50–irq94）
+# R11 eMMC 测试结果（irq50–irq99）
 
 本表汇总 XNU `qcom_emmc` 在 OPPO R11（SDM660，eMMC 5.1）上的真机测试。
 每次只改变一个变量，镜像通过 `fastboot boot` 加载，不写分区。
 
+> irq99 镜像与 irq98-linux 字节相同；它不能算独立的 irq99 二进制结果。
 > 当前结论：CMD13 能到 Transfer/READY_FOR_DATA，CMD17/CMD18 命令通道可完成，
 > 但 LBA1 数据仍是第一个 word 重复（`4546492045464920`，即 `"EFI EFI "`），
 > 没有读到 `EFI PART`。eMMC 数据阶段尚未打通。
@@ -46,8 +47,24 @@
 | 90 | GCC 后 SDHCI divider=0 | `CMD1 busy`，`d1=0` | divider 不是阻塞 |
 | 91 | 恢复 PMIC handshake | `CMD1 busy`，`d1=0` | 电源握手仍无法让卡应答 |
 | 92 | CMD0 `0xF0F0F0F0` 后加 10 ms | 仍 `EFI EFI`，`s=0`，`n=512` | HS400 复位等待不是根因 |
-| 93 | CMD17 前 `SWRST_CMD|DAT` 0x06 | 仍 `EFI EFI`，`hc2=0000/0003` | FIFO/DMA 残留不是根因 |
-| 94 | CMD18 多块读 2 blocks | 已构建，尚未上机 | 验证单块/多块时序 |
+| 93 | CMD17 前 `SWRST_CMD/DAT` 0x06 | 仍 `EFI EFI`，`hc2=0000/0003` | FIFO/DMA 残留不是根因 |
+| 94 | CMD18 多块读 2 blocks | 已上机；`EFI EFI`，`s=0`；CMD18 只传 1 块（`s=512`） | 多块/AUTO_CMD12 未解决 |
+| 95 | CMD17，BUF_RDY → drain → TC | 仍 `EFI EFI`，`s=0`，`n=512` | TC/FIFO 顺序不是唯一根因 |
+| 96 | CMD16 SET_BLOCKLEN=512 | 仍 `EFI EFI`；`rev 0`、`sec 0`、`no capacity`、`init failed 6` | 块大小不是根因 |
+| 97 | 只更新 IRQ 标记 | 仍 `EFI EFI`，`w=0`，`init failed 6` | 无新变量 |
+| 98 | Linux 风格：保留 HS400/8-bit/ADMA，不复位 | `warm no rca`、`linux no rca`、`init failed 6` | RCA/命令相位失败 |
+| 99 | 写 `CORE_VENDOR_SPEC=0xa9c` | 镜像与 irq98-linux 相同；仍 `no rca` | 未体现新改动 |
+
+## irq95–irq99 镜像
+
+| irq | 大小 | sha256 |
+|---|---|---|
+| 95 | 8,638,464 | `87b55c2598dff44f15fad2e18f7336f482856a6913af19a5c82d4091d62384cd` |
+| 96 | 8,638,464 | `0feee44fba8f5f489e4af79c35de61d8cbdff6a0fb9d5f3fe1310eb59f1c4114` |
+| 97 | 8,646,656 | `cd39ab00fa64e25671467666bbede0b427640c63956a7a7ce895c1bebb016ef9` |
+| 98 | 8,642,560 | `8a487cf3ad0a423473e21734966a31c1ba4609a3e5f56fbfb3b85d0a2f33123b` |
+| 98-linux | 8,638,464 | `b21a92ddc03fbdf61b624cf24f44285b7e9143b4a691859ce17b8d56982bd0d2` |
+| 99 | 8,638,464 | `b21a92ddc03fbdf61b624cf24f44285b7e9143b4a691859ce17b8d56982bd0d2`（与 98-linux 相同） |
 
 ## USB CDC 串口（irq74–irq81，已放弃）
 
