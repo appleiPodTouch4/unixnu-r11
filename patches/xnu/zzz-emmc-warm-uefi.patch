@@ -1,0 +1,43 @@
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1059,6 +1059,13 @@
+ 	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
+ 	hc_wr8(SDHCI_TIMEOUT_CONTROL, 0x0eu);
+ 
++	/* The bootloader may leave CORE_VENDOR_SPEC3 bit 10 set; with it the
++	 * PIO data port returns the first word forever ("EFI EFI "). */
++	{
++		uint32_t v3 = hc_rd(0x250);
++		hc_wr(0x250, v3 & ~(1u << 10));
++	}
++
+ 	qcom_emmc_warm = 2;
+ 	/*
+ 	 * boot-irq84: UEFI/SdccDxe may leave the card deselected with an RCA that is
+@@ -1103,6 +1110,26 @@
+ 		}
+ 	}
+ 
++	/* Reset a stale DAT line and set CMD16 BLOCKLEN=512, matching the
++	 * passive UEFI probe that successfully read EFI PART. */
++	hc_wr8(SDHCI_SOFTWARE_RESET, 0x04u);
++	{
++		uint64_t d = timeout_ns(20ull * NSEC_PER_MSEC);
++		while (hc_rd8(SDHCI_SOFTWARE_RESET) & 0x04u) {
++			if (!wait_deadline(d)) break;
++		}
++	}
++	hc_wr16(SDHCI_INT_STATUS, 0xffffu);
++	{
++		uint32_t c16[4] = { 0, 0, 0, 0 };
++		error = emmc_cmd(16, EMMC_BLOCK,
++		    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, c16, NULL, 0);
++		if (error) {
++			BP_STAGE("emmc: warm cmd16 err");
++			return 1;
++		}
++	}
++
+ 	qcom_emmc_warm = 3;
+ 	/*
+ 	 * boot-irq84: use PIO in the inherited 8-bit HS400 state instead of the

@@ -531,7 +531,9 @@ kernel_args = [
   # irq90: after GCC 400k set the SDHCI divider to 0 (clover), not 249.
   # Photo: CMD1 still mute; divider was not the blocker.
   # irq91: restore CORE_PWRCTL handshake/probe; keep GCC/FIFO/divider=0.
-  "sheng-build-tag=irq91",
+  # irq92: CMD0 arg=0xF0F0F0F0 (pre-idle) to reset HS400 state machine.
+  # irq96: CMD16 SET_BLOCKLEN=512; based on the recorded patch series.
+  "sheng-build-tag=irq96",
   # boot-irq11b.img was this list + this line on the irq11 kernel; from irq12 on
   # it is part of the main line: the timer handler also calls rtclock_intr(0),
   # because without it the first tick only counts and re-arms CNTV_CVAL, XNU's

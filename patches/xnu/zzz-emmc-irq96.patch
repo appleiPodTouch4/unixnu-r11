@@ -1,0 +1,18 @@
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1495,6 +1495,15 @@
+ 		BP_STAGE(line);
+ 	}
+ 
++	/* boot-irq96: set the card block length before the first CMD17. */
++	error = emmc_cmd(16, 512,
++	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp, NULL, 0);
++	printf("emmc: CMD16 %s\n", error ? "err" : "ok");
++	BP_STAGE(error ? "emmc: CMD16 err" : "emmc: CMD16 ok");
++	if (error) {
++		return error;
++	}
++
+ 	/*
+ 	 * boot-irq83: do NOT switch HS_TIMING/BUS_WIDTH.  CMD0/CMD1/CMD2/CMD3/CMD7
+ 	 * already put the card back in its default 1-bit mode; the host is 1-bit

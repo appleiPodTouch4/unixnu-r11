@@ -36,7 +36,7 @@
 +				delay(20000);	/* 20 ms for the rail to settle */
 +				hc_wr8(SDHCI_SOFTWARE_RESET, 0x02u);
 +				delay(1000);
-+				(void)emmc_cmd(0, 0, SDHCI_CMD_RESP_NONE, NULL, NULL, 0);
++				(void)emmc_cmd(0, 0xF0F0F0F0u, SDHCI_CMD_RESP_NONE, NULL, NULL, 0);
 +				if (!emmc_cmd(1, 0x40ff8080u, SDHCI_CMD_RESP_R48, r, NULL, 0)) {
 +					pwr_mask |= (1u << v);
 +					su.ocr = r[0];

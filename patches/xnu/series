@@ -121,27 +121,8 @@ zzz-emmc-1bit-default.patch
 # boot-irq84: warm RCA scan 1..8 (CMD13, then CMD7+CMD13), then PIO LBA1 in the
 # inherited 8-bit/HS400 state; no 64-bit ADMA descriptor, no host reset.
 zzz-emmc-warm-rca.patch
-# boot-irq85: skip SWRST_ALL, which stays asserted on this unit and leaves the host
-# half-reset; keep boot host state, then the normal CMD0..CMD7 1-bit path.
-zzz-emmc-noswreset.patch
-# boot-irq86: SDM660 SDCC has no internal divider; program GCC sdcc1_apps_clk_src
-# to 400 kHz (clover CFG=0x2017 M=1 N=fc D=fb), and clear VENDOR_SPEC3 bit10
-# (alt FIFO) which makes the buffer port return the first word forever.
-zzz-emmc-gcc400.patch
-# boot-irq87: irq86 hung before "clk 400k id"/v3; stop calling the GCC root-clock
-# helper, keep the VENDOR_SPEC3 alt-FIFO clear, so the FIFO fix is tested alone.
-zzz-emmc-fifo-only.patch
-# boot-irq88: re-enable GCC 400k, but stop the card clock and RESET_CMD|DATA (0x06)
-# first (clover mode 6); stages stop/rst/cfg/up/done.
-zzz-emmc-gcc-safe.patch
-# boot-irq89: skip the CORE_PWRCTL handshake/probe; clover sets 1.8 V and proceeds.
-zzz-emmc-pwrskip.patch
-# boot-irq90: after GCC root 400k, SDHCI divider must be 0 (clover), not the v3
-# 249 field computed for a 200 MHz base; otherwise CMD1 is divided twice.
-zzz-emmc-div0.patch
-# boot-irq91: restore the CORE_PWRCTL handshake/probe; divider=0 did not make CMD1
-# answer, so the card power is the remaining suspect.
-zzz-emmc-pwrrestore.patch
+# irq96: CMD16 SET_BLOCKLEN=512 after CMD7/CMD13, before the first CMD17.
+zzz-emmc-irq96.patch
 # USB CDC serial parked (2026-11-08): STILL u=5 after reset/status/endpoint fixes.
 # Files kept on disk for later: native-dwc3-console.patch, zzz-dwc3-*.patch.
 # REJECTED, kept on disk: boot-irq58's warm-inherit CMD13+SDMA read (black screen).
@@ -233,3 +214,7 @@ zzz-trustcache-skip.patch
 # static region. This patch applies the same mask inside OSKext::start(), which lets
 # matching walk past the security kexts and on to the /cpus nubs.
 zzz-skip-security-start.patch
+
+# Warm handoff: preserve ABL VSPEC, clear CORE_VENDOR_SPEC3 bit10,
+# SWRST_DAT + CMD16 + PIO CMD17 after finding RCA.
+zzz-emmc-warm-uefi.patch

@@ -13,6 +13,10 @@
 #     does not answer. CMD0 (GO_IDLE_STATE) is now sent first, best effort: a card
 #     that is already idle answers it with an error, and that must not stop the
 #     OCR loop.
+#
+# boot-irq92: CMD0 arg changed to 0xF0F0F0F0 (pre-idle mode, JEDEC 5.1) to reset
+# the HS400 state machine XBL/ABL left behind. arg=0 only moves to idle without
+# changing speed/width.
 --- a/bsd/dev/qcom_emmc.c
 +++ b/bsd/dev/qcom_emmc.c
 @@ -291,12 +291,16 @@
@@ -35,7 +39,7 @@
 @@ -529,7 +533,19 @@
  	/* Power: 1.8 V signalling, bus on. QCom v5 may ignore this. */
  	hc_wr8(SDHCI_HOST_CONTROL + 1, 0x0bu);
- 
+
 -	/* CMD0, then CMD1 until the card leaves busy. */
 +	/*
 +	 * boot-irq24's CMD1 came back with a real error bit and CMD-inhibit still set.
@@ -45,7 +49,7 @@
 +	 * now -- best effort, because a card already in idle answers CMD0 with an
 +	 * error too and that must not stop the OCR loop.
 +	 */
-+	error = emmc_cmd(0, 0, SDHCI_CMD_RESP_NONE, NULL, NULL, 0);
++	error = emmc_cmd(0, 0xF0F0F0F0u, SDHCI_CMD_RESP_NONE, NULL, NULL, 0);
 +	printf("R11 eMMC: cmd0 -> %d\n", error);
 +	BP_STAGE(error ? "emmc: cmd0 err" : "emmc: cmd0 ok");
 +

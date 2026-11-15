@@ -60,6 +60,6 @@
 +		BP_STAGE((hc_rd(SDHCI_PRESENT_STATE) & SDHCI_CMD_INHIBIT) ?
 +		    "emmc: cmd inh stuck" : "emmc: cmd inh clear");
 +	}
- 	error = emmc_cmd(0, 0, SDHCI_CMD_RESP_NONE, NULL, NULL, 0);
+ 	error = emmc_cmd(0, 0xF0F0F0F0u, SDHCI_CMD_RESP_NONE, NULL, NULL, 0);
  	printf("R11 eMMC: cmd0 -> %d\n", error);
  	BP_STAGE(error ? "emmc: cmd0 err" : "emmc: cmd0 ok");
