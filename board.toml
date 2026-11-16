@@ -145,6 +145,7 @@ kernel_args = [
   # says so in the top bar without ever suspending the OS, which is what a boot
   # bring-up needs.
   "boot-progress=2",
+  "r11-panel-minimal=1",
   # Paint from whichever thread records a stage or console line instead of waiting
   # for the monitor thread's timer. The monitor only repaints on its tick, so an
   # IRQ-off spin freezes the frame at the last draw -- not at the last stage -- and

@@ -1,0 +1,33 @@
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -145,6 +145,7 @@
+ /* boot-irq60: 1 after the boot-state read, 2 after CMD13, 3 when the warm ADMA2
+  * LBA1 read delivered EFI PART and the driver kept the bootloader's state. */
+ volatile unsigned int qcom_emmc_warm;
++char qcom_emmc_part_row[512];
+ volatile uint64_t qcom_emmc_part_lba, qcom_emmc_part_n;
+ volatile unsigned qcom_emmc_gpt_entry_lba, qcom_emmc_gpt_nent, qcom_emmc_gpt_esize;
+ volatile int qcom_emmc_part_ok;
+@@ -964,6 +965,7 @@
+ 	if (error) {
+ 		return error;
+ 	}
++	qcom_emmc_part_row[0] = 0;
+ 	for (uint32_t i = 0; i < nent; i++) {
+ 		const uint8_t *e = ents + i * esz;
+ 		char name[37];
+@@ -978,6 +980,14 @@
+ 			name[c] = (char)ch;
+ 		}
+ 		name[c] = 0;
++		if (name[0]) {
++			size_t used = strlen(qcom_emmc_part_row);
++			if (used + strlen(name) + 2 < sizeof(qcom_emmc_part_row)) {
++				if (used) qcom_emmc_part_row[used++] = ',';
++				strlcpy(qcom_emmc_part_row + used, name,
++				    sizeof(qcom_emmc_part_row) - used);
++			}
++		}
+ 		if (strcmp(name, want) != 0) {
+ 			continue;
+ 		}

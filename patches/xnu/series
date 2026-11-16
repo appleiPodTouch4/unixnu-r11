@@ -218,3 +218,24 @@ zzz-skip-security-start.patch
 # Warm handoff: preserve ABL VSPEC, clear CORE_VENDOR_SPEC3 bit10,
 # SWRST_DAT + CMD16 + PIO CMD17 after finding RCA.
 zzz-emmc-warm-uefi.patch
+
+# Expose GPT header/partition values to the boot-progress panel.
+zzz-emmc-gptvals.patch
+
+# Expose compact GPT partition names to the boot-progress panel.
+zzz-emmc-partrow.patch
+
+# Show GPT partition-read status in the minimal panel.
+zzz-emmc-partstatus.patch
+
+# GPT entries: use a UEFI-style polling PIO read instead of emmc_cmd.
+zzz-emmc-gptread.patch
+
+# vfs_mountroot: force the qcom_emmc device when it initialized.
+zzz-emmc-rootforce.patch
+
+# eMMC root: skip Apple sealed-root authentication for the port.
+zzz-emmc-rootauth.patch
+
+# Root auth: gate the panic on require_rootauth after bypass.
+zzz-emmc-rootauth2.patch

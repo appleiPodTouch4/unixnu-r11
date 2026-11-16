@@ -88,6 +88,7 @@ static unsigned render_busy;
 // the diagnostic page. Any new validated scanout yields it again through boot_progress_prepare_scanout.
 static unsigned resume_after,last_scanout_at;
 static char build_tag[32];
+static int panel_minimal;
 const char *boot_progress_tag(void) { return build_tag; }
 static struct bp_pulse pulse;
 struct bp_panic_info boot_progress_panic_vinfo;
@@ -119,6 +120,12 @@ extern volatile unsigned int qcom_emmc_r1 __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_ext __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_d1 __attribute__((weak_import));
 extern volatile unsigned long long qcom_emmc_d1q __attribute__((weak_import));
+extern volatile uint64_t qcom_emmc_part_lba __attribute__((weak_import));
+extern char qcom_emmc_part_row[512] __attribute__((weak_import));
+extern volatile uint64_t qcom_emmc_part_n __attribute__((weak_import));
+extern volatile int qcom_emmc_part_ok __attribute__((weak_import));
+extern volatile unsigned qcom_emmc_gpt_nent __attribute__((weak_import));
+extern volatile unsigned qcom_emmc_gpt_entry_lba __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_bs __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_bc __attribute__((weak_import));
 extern volatile unsigned int qcom_emmc_dat __attribute__((weak_import));
@@ -405,6 +412,7 @@ static void capture(unsigned row, const char *text) {
 }
 static void line(unsigned row, const char *text, uint32_t color) {
   capture(row,text);
+  if (panel_minimal && row > 3 && !(row >= 16 && row <= 23)) return;
   // Reserve the last diagnostic row for a readable independent pulse.
   if(row==47 && __atomic_load_n(&pulse.ready,__ATOMIC_ACQUIRE))return;
   bp_line(&display,row,text,color);
@@ -415,6 +423,7 @@ static void line(unsigned row, const char *text, uint32_t color) {
 #define BP_BAR_SECTION 0xff1a2029
 static void bar(unsigned row, const char *text, uint32_t color, uint32_t background) {
   capture(row,text);
+  if (panel_minimal && row > 2 && row != 16) return;
   if(row==47 && __atomic_load_n(&pulse.ready,__ATOMIC_ACQUIRE))return;
   bp_line_bg(&display,row,text,color,background);
 }
@@ -488,13 +497,26 @@ static void draw(unsigned now) {
    * means the old "EFI EFI " was a host-side drain/sampling artefact; d1=d2="EFI EFI "
    * at 400 kHz leaves the card's own data phase as the only suspect. d0 is bytes
    * 510..511 of LBA 0 (0x55AA when block addressing is right). */
-  snprintf(b,sizeof(b),"emmc d1=%016llx d2=%016llx s=%u s2=%u n=%u n2=%u e=%02x e2=%02x d0=%06x",
-    qcom_emmc_d1q, &qcom_emmc_d2q ? qcom_emmc_d2q : 0ull,
-    (qcom_emmc_r1 >> 16) & 1u, ((&qcom_emmc_r2 ? qcom_emmc_r2 : 0u) >> 16) & 1u,
-    qcom_emmc_r1 & 0xffffu, &qcom_emmc_r2 ? qcom_emmc_r2 & 0xffffu : 0u,
-    (qcom_emmc_r1 >> 24) & 0xffu, &qcom_emmc_r2 ? (qcom_emmc_r2 >> 24) & 0xffu : 0u,
-    qcom_emmc_d0 & 0xffffffu);
+  {
+    char sig[9]; uint64_t d = qcom_emmc_d1q;
+    for (unsigned i = 0; i < 8; i++) {
+      unsigned char ch = (unsigned char)(d >> (56 - 8 * i));
+      sig[i] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : '.';
+    }
+    sig[8] = 0;
+    snprintf(b,sizeof(b),"emmc d1=%016llx sig=%s part=%llx/%llu ok=%d gpt=%u@%u",
+      qcom_emmc_d1q, sig,
+      (unsigned long long)(&qcom_emmc_part_lba ? qcom_emmc_part_lba : 0),
+      (unsigned long long)(&qcom_emmc_part_n ? qcom_emmc_part_n : 0),
+      &qcom_emmc_part_ok ? qcom_emmc_part_ok : 0,
+      &qcom_emmc_gpt_nent ? qcom_emmc_gpt_nent : 0,
+      &qcom_emmc_gpt_entry_lba ? qcom_emmc_gpt_entry_lba : 0);
+  }
   line(2,b,0xffffffff);
+  if (&qcom_emmc_part_row) {
+    snprintf(b,sizeof(b),"part %s",qcom_emmc_part_row);
+    line(3,b,0xff88ff88);
+  }
   /* boot-irq54: the data-phase instruments get row 3 to themselves, in place of the
    * static TCR/TTBR/SCTLR text. bs/bc = BLOCK_SIZE/BLOCK_COUNT read back, dat = the four
    * DAT line levels sampled right after CMD17, sdm = SDMA address valid. Earlier attempts
@@ -518,7 +540,7 @@ static void draw(unsigned now) {
     &qcom_emmc_sdma_ok ? qcom_emmc_sdma_ok : 0u,
     &qcom_emmc_st13 ? qcom_emmc_st13 : 0u,
     &qcom_emmc_dmaerr ? qcom_emmc_dmaerr : 0u);
-  line(3,b,0xffffffff);
+  if (!panel_minimal) line(3,b,0xffffffff);
   // Row 4 carried the root-match counters (fnd/cand/fam/passes). They answered
   // their question and are now dead: the pass that publishes the DT nodes is not
   // a match on a service named "device-tree" (nothing is), so every one of those
@@ -777,7 +799,7 @@ static void draw(unsigned now) {
           extern volatile unsigned r11_dsm_all, r11_dsm_root;
           n+=(int)snprintf(b+n,sizeof(b)-n,"|DSM a=%u r=%u",r11_dsm_all,r11_dsm_root);
         }
-        if(n>0)line(2,b,0xff66ffcc);
+        if(n>0 && !panel_minimal)line(2,b,0xff66ffcc);
       }
       // Rows 2-3 stay above the panic screen's clear line (height/8), so the probe decision
       // survives the AppleARMCPU panic that ends this boot.
@@ -1053,6 +1075,10 @@ void boot_progress_init(void) {
   state.continuous=opt==2; enabled=opt;
   PE_parse_boot_argn("boot-progress-sync",&sync_draw,sizeof(sync_draw));
   PE_parse_boot_argn("sheng-build-tag",build_tag,sizeof(build_tag));build_tag[sizeof(build_tag)-1]=0;
+  {
+    unsigned v = 0;
+    if (PE_parse_boot_argn("r11-panel-minimal", &v, sizeof(v))) panel_minimal = v != 0;
+  }
   if (PE_parse_boot_argn("boot-diag-resume",&resume_after,sizeof(resume_after)) && (resume_after<5 || resume_after>3600)) resume_after=0;
   boot_progress_stage("PE initialized; early native mappings");
 }

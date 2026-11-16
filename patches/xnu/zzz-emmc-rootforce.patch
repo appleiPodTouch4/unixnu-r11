@@ -1,0 +1,18 @@
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1261,11 +1261,13 @@
+ 			 */
+ 			return ENXIO;
+ 		}
+-		if (emmc_state == 0 && rootdev == NODEV) {
++		if (emmc_state == 0) {
+ 			char stage[64];
+ 
++			/* Make the eMMC device authoritative: IOFindBSDRoot can leave a
++			 * different/stale rootdev that has no open handler. */
+ 			rootdev = emmc_dev;
+-			printf("R11 eMMC: rootdev <- 0x%x\n", (unsigned)rootdev);
++			printf("R11 eMMC: rootdev forced <- 0x%x\n", (unsigned)rootdev);
+ 			if (boot_progress_stage != NULL) {
+ 				snprintf(stage, sizeof(stage), "eMMC rootdev <- 0x%x",
+ 				    (unsigned)rootdev);

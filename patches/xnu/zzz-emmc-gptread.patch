@@ -1,0 +1,75 @@
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -933,6 +933,54 @@
+ }
+ 
+ static int
++gpt_read_one(uint64_t lba, uint8_t *buf)
++{
++	uint64_t deadline = timeout_ns(CMD_TIMEOUT_NS);
++	uint32_t s;
++	unsigned w;
++
++	if (emmc_wait(SDHCI_CMD_INHIBIT, 0, deadline) ||
++	    emmc_wait(SDHCI_DATA_INHIBIT, 0, deadline)) return EIO;
++	hc_wr(SDHCI_INT_STATUS, 0xffffffffu);
++	hc_wr16(SDHCI_BLOCK_SIZE, EMMC_BLOCK);
++	hc_wr16(SDHCI_BLOCK_COUNT, 1);
++	hc_wr16(SDHCI_TRANSFER_MODE, SDHCI_TM_READ | SDHCI_TM_BLKCNT_EN);
++	hc_wr(SDHCI_ARGUMENT, (uint32_t)lba);
++	hc_wr16(SDHCI_COMMAND, SDHCI_CMD(17,
++	    SDHCI_CMD_RESP_R48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX | SDHCI_CMD_DATA));
++	while (1) {
++		s = hc_rd(SDHCI_INT_STATUS);
++		if (s & SDHCI_INT_CMD_COMPLETE) break;
++		if (s & SDHCI_INT_ERROR) {
++			hc_wr(SDHCI_INT_STATUS, 0xffffffffu);
++			return EIO;
++		}
++		if (!wait_deadline(deadline)) return ETIMEDOUT;
++	}
++	for (w = 0; w < EMMC_BLOCK / 4; w++) {
++		uint64_t bw = timeout_ns(20ull * NSEC_PER_MSEC);
++		while (!(hc_rd(SDHCI_PRESENT_STATE) & SDHCI_BUF_READ_EN)) {
++			if (!wait_deadline(bw)) return ETIMEDOUT;
++		}
++		((uint32_t *)buf)[w] = hc_rd(SDHCI_BUFFER);
++	}
++	hc_wr(SDHCI_INT_STATUS, 0xffffffffu);
++	return 0;
++}
++
++static int
++gpt_read_blocks(uint64_t lba, uint32_t count, uint8_t *buf)
++{
++	while (count--) {
++		int error = gpt_read_one(lba, buf);
++		if (error) return error;
++		lba++;
++		buf += EMMC_BLOCK;
++	}
++	return 0;
++}
++
++static int
+ emmc_find_partition(const char *want)
+ {
+ 	uint8_t b[512];
+@@ -940,7 +988,7 @@
+ 	uint32_t nent, esz;
+ 	int error;
+ 
+-	error = emmc_read_blocks(1, 1, b);
++	error = gpt_read_blocks(1, 1, b);
+ 	if (error) {
+ 		snprintf(qcom_emmc_part_row, sizeof(qcom_emmc_part_row), "read err %d", error);
+ 		return error;
+@@ -967,7 +1015,7 @@
+ 	snprintf(qcom_emmc_part_row, sizeof(qcom_emmc_part_row),
+ 	    "hdr n=%u@%u", nent, (unsigned)entry_lba);
+ 	static uint8_t ents[1024 * 128];
+-	error = emmc_read_blocks(entry_lba, (nent * esz + EMMC_BLOCK - 1) / EMMC_BLOCK, ents);
++	error = gpt_read_blocks(entry_lba, (nent * esz + EMMC_BLOCK - 1) / EMMC_BLOCK, ents);
+ 	if (error) {
+ 		snprintf(qcom_emmc_part_row, sizeof(qcom_emmc_part_row),
+ 		    "entries err %d n=%u@%u", error, nent, (unsigned)entry_lba);

@@ -131,6 +131,32 @@ kernel-side storage, display, input and power drivers are not written; see
 | Kernel | builds and prelinks on this host; `build/xnu/.../mach.development.bcm2837` 15.5 MB, `kernel/kernel.macho` 53.8 MB |
 | Payload / boot image | payload 192 MiB holding `kernel.macho` and its ADT; `boot.img` 202,670,080 bytes carries it as the ramdisk (`fastboot boot` only) |
 
+### Bring-up checkpoint — 2026-11-16
+
+The eMMC warm handoff now reaches the block layer:
+
+- UEFI passive handoff reads LBA1 and returns `EFI PART`; the same state was
+  used to read LBA2 (`R11|stage=passive|...|el=2|ne=72|es=128|l2=Success`).
+- The XNU panel reaches `qcom_emmc_init`, selects `userdata`, and reports
+  `part=0x70000/... ok=1` plus the GPT partition names.
+- The iOS 16.5 OS DMG was converted to a raw APFS container (5.2 GiB) and
+  written to `userdata` with a sparse fastboot image. A raw 5.2 GiB image cannot
+  be sent directly because the bootloader's `max-download-size` is 512 MiB.
+- Root now mounts, but process 1 still fails with
+  `exec /sbin/launchd: errno 8 (ENOEXEC)`. `launchd` is a valid arm64 Mach-O;
+  decompressing it and `dyld` does not change the result. The next check is the
+  XNU code-signing/AMFI path, not another rootfs rewrite.
+
+Temporary bring-up patches currently in `patches/xnu/series`:
+`zzz-emmc-gptread`, `zzz-emmc-gptvals`, `zzz-emmc-partrow`,
+`zzz-emmc-partstatus`, `zzz-emmc-rootforce`, `zzz-emmc-rootauth`,
+`zzz-emmc-rootauth2`. The minimal panel is enabled by
+`r11-panel-minimal=1` in `board.toml`; it keeps the title/time/eMMC rows,
+the partition row, and the kernel console.
+
+The modified TWRP boot image and the APFS/rootfs staging files live in the
+sibling work tree `../twrp-work` and are intentionally not committed here.
+
 ## Related
 
 * [`docs/emmc-test-log.md`](docs/emmc-test-log.md) — irq50–irq94 eMMC/USB bring-up test table.

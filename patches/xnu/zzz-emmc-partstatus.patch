@@ -1,0 +1,69 @@
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -942,9 +942,11 @@
+ 
+ 	error = emmc_read_blocks(1, 1, b);
+ 	if (error) {
++		snprintf(qcom_emmc_part_row, sizeof(qcom_emmc_part_row), "read err %d", error);
+ 		return error;
+ 	}
+ 	if (memcmp(b, "EFI PART", 8) != 0) {
++		strlcpy(qcom_emmc_part_row, "no gpt", sizeof(qcom_emmc_part_row));
+ 		printf("R11 eMMC: no GPT\n");
+ 		BP_STAGE("emmc: no GPT");
+ 		return ENXIO;
+@@ -956,16 +958,22 @@
+ 	qcom_emmc_gpt_nent = nent;
+ 	qcom_emmc_gpt_esize = esz;
+ 	if (esz != 128 || nent == 0 || nent > 1024) {
++		snprintf(qcom_emmc_part_row, sizeof(qcom_emmc_part_row),
++		    "bad gpt %u@%u/%u", nent, (unsigned)entry_lba, esz);
+ 		printf("R11 eMMC: unsupported GPT entries %u x %u\n", nent, esz);
+ 		BP_STAGE("emmc: bad GPT");
+ 		return ENXIO;
+ 	}
++	snprintf(qcom_emmc_part_row, sizeof(qcom_emmc_part_row),
++	    "hdr n=%u@%u", nent, (unsigned)entry_lba);
+ 	static uint8_t ents[1024 * 128];
+ 	error = emmc_read_blocks(entry_lba, (nent * esz + EMMC_BLOCK - 1) / EMMC_BLOCK, ents);
+ 	if (error) {
++		snprintf(qcom_emmc_part_row, sizeof(qcom_emmc_part_row),
++		    "entries err %d n=%u@%u", error, nent, (unsigned)entry_lba);
+ 		return error;
+ 	}
+-	qcom_emmc_part_row[0] = 0;
++	strlcpy(qcom_emmc_part_row, "parts ", sizeof(qcom_emmc_part_row));
+ 	for (uint32_t i = 0; i < nent; i++) {
+ 		const uint8_t *e = ents + i * esz;
+ 		char name[37];
+@@ -1004,6 +1012,13 @@
+ 		qcom_emmc_part_n = last - first + 1;
+ 		qcom_emmc_part_ok = 1;
+ 		{
++			size_t used = strlen(qcom_emmc_part_row);
++			snprintf(qcom_emmc_part_row + used,
++			    sizeof(qcom_emmc_part_row) - used,
++			    " [%s@%llx/%llu]", name,
++			    (unsigned long long)first, (unsigned long long)qcom_emmc_part_n);
++		}
++		{
+ 			char line[80];
+ 
+ 			snprintf(line, sizeof(line), "emmc: part %.20s lba=0x%llx n=%llu",
+@@ -1014,6 +1029,8 @@
+ 		return 0;
+ 	}
+ 	qcom_emmc_part_ok = -1;
++	snprintf(qcom_emmc_part_row, sizeof(qcom_emmc_part_row),
++	    "no part %s", want);
+ 	printf("R11 eMMC: no GPT partition named \"%s\"\n", want);
+ 	BP_STAGE("emmc: no part");
+ 	return ENOENT;
+@@ -1912,6 +1929,7 @@
+ 	/* Reachability verdict: if this never shows up on the panel, vfs_mountroot was
+ 	 * never entered and the driver is not the thing that hung. */
+ 	BP_STAGE("emmc: probe");
++	strlcpy(qcom_emmc_part_row, "pending", sizeof(qcom_emmc_part_row));
+ 	su.hc = ml_io_map(0x0c0c4000, 0x1000);
+ 	su.core = ml_io_map(0x0c0c5000, 0x1000);
+ 	if (!su.hc || !su.core) {

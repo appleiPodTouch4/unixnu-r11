@@ -1,0 +1,40 @@
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -145,6 +145,9 @@
+ /* boot-irq60: 1 after the boot-state read, 2 after CMD13, 3 when the warm ADMA2
+  * LBA1 read delivered EFI PART and the driver kept the bootloader's state. */
+ volatile unsigned int qcom_emmc_warm;
++volatile uint64_t qcom_emmc_part_lba, qcom_emmc_part_n;
++volatile unsigned qcom_emmc_gpt_entry_lba, qcom_emmc_gpt_nent, qcom_emmc_gpt_esize;
++volatile int qcom_emmc_part_ok;
+ /* boot-irq67: CMD6 HS_TIMING/BUS_WIDTH result: (error<<24) | busy-timeout(0x800000) |
+  * low 24 bits of the R1 response.  This says whether the card accepted the switch. */
+ volatile unsigned int qcom_emmc_c6_hs, qcom_emmc_c6_bw;
+@@ -948,6 +951,9 @@
+ 	memcpy(&entry_lba, b + 72, 8);
+ 	memcpy(&nent, b + 80, 4);
+ 	memcpy(&esz, b + 84, 4);
++	qcom_emmc_gpt_entry_lba = (unsigned)entry_lba;
++	qcom_emmc_gpt_nent = nent;
++	qcom_emmc_gpt_esize = esz;
+ 	if (esz != 128 || nent == 0 || nent > 1024) {
+ 		printf("R11 eMMC: unsupported GPT entries %u x %u\n", nent, esz);
+ 		BP_STAGE("emmc: bad GPT");
+@@ -984,6 +990,9 @@
+ 		}
+ 		su.first_block = first;
+ 		su.nblocks = last - first + 1;
++		qcom_emmc_part_lba = first;
++		qcom_emmc_part_n = last - first + 1;
++		qcom_emmc_part_ok = 1;
+ 		{
+ 			char line[80];
+ 
+@@ -994,6 +1003,7 @@
+ 		}
+ 		return 0;
+ 	}
++	qcom_emmc_part_ok = -1;
+ 	printf("R11 eMMC: no GPT partition named \"%s\"\n", want);
+ 	BP_STAGE("emmc: no part");
+ 	return ENOENT;
