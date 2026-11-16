@@ -1,0 +1,27 @@
+--- a/bsd/dev/qcom_emmc.c
++++ b/bsd/dev/qcom_emmc.c
+@@ -1059,6 +1059,24 @@
+ 		qcom_emmc_part_lba = first;
+ 		qcom_emmc_part_n = last - first + 1;
+ 		qcom_emmc_part_ok = 1;
++		/*
++		 * Standard UniXNU userdata carries a 1 MiB SHNGROOT manifest and
++		 * places the OS APFS window at +0x100000.  Raw test images start
++		 * with APFS at offset 0; detect and skip only the manifest.
++		 */
++		{
++			uint8_t hdr[EMMC_BLOCK];
++			if (gpt_read_blocks(first, 1, hdr) == 0 &&
++			    memcmp(hdr, "SHNGROOT", 8) == 0 &&
++			    su.nblocks > (0x100000u / EMMC_BLOCK)) {
++				uint64_t off = 0x100000u / EMMC_BLOCK;
++				su.first_block = first + off;
++				su.nblocks -= off;
++				qcom_emmc_part_lba = su.first_block;
++				qcom_emmc_part_n = su.nblocks;
++				BP_STAGE("emmc: shngroot os window");
++			}
++		}
+ 		{
+ 			size_t used = strlen(qcom_emmc_part_row);
+ 			snprintf(qcom_emmc_part_row + used,

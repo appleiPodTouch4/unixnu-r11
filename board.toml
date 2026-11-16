@@ -83,6 +83,7 @@ SHIP_MODE = "FALSE"
 BUILDID_STRING = "r11"
 
 [payload]
+trust_cache_sha256 = ["d29198a360894248df37b1aab9c470596903048c7333c732e7d7a7f251dbbd5c"]
 volume = "R11ESP"
 # Adds "Tools" to the generated boot menu, which is where AdvancedLogDxe
 # registers itself (Tools -> Advanced Logger -> QR pages of the firmware log).
@@ -102,7 +103,7 @@ tools = true
 # layout leaves 0x9D0; without stage 3 it starts one cave earlier and 0xA30
 # fits). The panic screen is the better signal anyway -- a panic anywhere after
 # the MMU is on is visible with full text, not just a timed reset.
-panic_screen = true
+panic_screen = false
 # The image is booted with "fastboot boot": boot is only 64 MiB
 # (GPT: 245760-376831), so a flashed image has to stay under that.
 #
@@ -146,6 +147,8 @@ kernel_args = [
   # bring-up needs.
   "boot-progress=2",
   "r11-panel-minimal=1",
+  "amfi_get_out_of_my_way=1",
+  "cs_enforcement_disable=1",
   # Paint from whichever thread records a stage or console line instead of waiting
   # for the monitor thread's timer. The monitor only repaints on its tick, so an
   # IRQ-off spin freezes the frame at the last draw -- not at the last stage -- and

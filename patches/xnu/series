@@ -239,3 +239,6 @@ zzz-emmc-rootauth.patch
 
 # Root auth: gate the panic on require_rootauth after bypass.
 zzz-emmc-rootauth2.patch
+
+# Standard userdata: skip the SHNGROOT manifest before the OS APFS window.
+zzz-emmc-shngroot.patch

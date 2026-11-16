@@ -157,6 +157,31 @@ the partition row, and the kernel console.
 The modified TWRP boot image and the APFS/rootfs staging files live in the
 sibling work tree `../twrp-work` and are intentionally not committed here.
 
+### Standard userdata / SHNGROOT test — 2026-11-16
+
+`./unixnu build userdata` produced the standard 7.78 GiB image (SHNGROOT
+manifest, OS at `0x100000`, SystemOS at `0x14fa00000`). The eMMC driver now
+detects `SHNGROOT` at the userdata start and advances the root window by
+`0x100000`; on hardware the panel reported:
+
+```text
+part=70800/111196127 ok=1 gpt=72@2
+Process exits: total=1 nonzero-status-or-reason=0
+p1 init status=0 sig=0 exit=0
+```
+
+`launchd` therefore executes from the standard OS APFS window and no longer
+fails with `ENOEXEC`. The remaining Stage 7 gap is the Data volume: the current
+kernel has `CONFIG_XNU_NATIVE_RAM_BLOCK=n` and
+`CONFIG_XNU_OWNER_DATA_MOUNT=n`, so `launchd` still exits because
+`/private/var` is not backed by the Data seed. `panic_screen=false` is
+temporary while `ld.lld` is unavailable; it only skips re-running the entry
+probe, not the existing panic screen in `kernel.macho`.
+
+Boot image: `boot-control/boot-r11-xnu-shngroot.img`
+(`sha256 413f1a758146c0cbd97ede978eb966be44e6e5fe94880aa564273efac74f09e3`),
+kernel `396e7e5f…`.
+
 ## Related
 
 * [`docs/emmc-test-log.md`](docs/emmc-test-log.md) — irq50–irq94 eMMC/USB bring-up test table.
